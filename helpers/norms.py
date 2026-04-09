@@ -6,33 +6,28 @@ plus the RTR composite scoring engine.
 
 RTR Scoring Model
 -----------------
-The score is NOT a simple weighted average of LSI values.  It uses three
-evidence-based stages:
+The score is a weighted composite using three stages:
 
-  1. Strict 3-zone metric scoring
+  1. Balanced 3-zone metric scoring
        Green  (≥ good threshold) → 85–100 points
        Yellow (≥ caution threshold) → 50–85 points
-       Red    (< caution threshold) → 0–50 points
-     This is significantly more punishing than linear-to-threshold scaling.
-     A value of 68.9% when the threshold is 90% scores ≈ 38, not 77.
+       Red    (< caution threshold) → 10–50 points  (floor prevents zero for near-misses)
 
-  2. Red-flag penalty
-       Every RED metric multiplies the base score by a penalty factor.
-       A single red metric → ×0.88; two reds → ×0.76; three → ×0.65 etc.
-       This means you cannot be "Ready" with significant deficits anywhere,
-       even if other metrics are excellent.
+  2. Red-flag penalty (softened — one red should not collapse an otherwise strong score)
+       0 reds → ×1.00 · 1 → ×0.93 · 2 → ×0.86 · 3 → ×0.80 · 4 → ×0.74 · 5+ → ×0.69
 
   3. Time-since-surgery modifier
        A multiplicative factor on the performance score (see time_factor()):
-         0–6 months   → factor 0.80 (flat)
-         6–10 months  → linear ramp 0.80 → 1.00 (0.05 per month)
+         0–6 months   → factor 0.80 (flat minimum)
+         6–10 months  → linear ramp 0.80 → 1.00
          ≥ 10 months  → factor 1.00
-       Grade may still be capped separately by time (time_grade_cap()).
-       Being far out from surgery does NOT inflate a poor score —
-       a bad performer at 18 months still scores poorly.
+       No hard grade cap by time — the time factor does the work.
+       The referring clinician already knows the timeline; this score reflects
+       objective performance data, lightly discounted for early post-op periods.
+       A poor performer at 18 months still scores poorly.
 
 Grade thresholds (applied to final time-adjusted score):
-  ≥ 85  → Ready
+  ≥ 95  → Ready
   ≥ 68  → Progressing
   ≥ 50  → Caution
   < 50  → Not Ready
@@ -99,14 +94,13 @@ class Norm:
 
     def score_0_100_strict(self, value: float) -> float:
         """
-        Strict 3-zone scoring:
-          Green  (≥ good)                  →  85–100  (small bonus for exceeding)
+        Balanced 3-zone scoring:
+          Green  (≥ good)                  →  85–100  (bonus for exceeding threshold)
           Yellow (≥ caution, < good)       →  50–85   (linear)
-          Red    (< caution)               →   0–50   (linear — NOT zero for near-miss)
+          Red    (< caution)               →  10–50   (floor at 10; near-misses aren't zero)
 
-        This is deliberately more punishing than (v/good)*100.
-        A value just barely in the red zone scores ~49 (not ~83), which
-        has meaningful impact on the composite when combined with red-flag penalties.
+        The excess_pct denominator uses abs(good) to handle metrics whose
+        "good" threshold is negative (e.g. fatigue_drift: good = −5%).
         """
         try:
             v = float(value)
@@ -119,17 +113,18 @@ class Norm:
             good    = self.good    if self.good    is not None else 90.0
             caution = self.caution if self.caution is not None else 75.0
             if v >= good:
-                # Green: 85 at threshold, up to 100 with 20% excess
-                excess_pct = min((v - good) / good, 0.20)
+                # Green: 85 at threshold, up to 100 for values 20% above good
+                denom = max(abs(good), 0.0001)
+                excess_pct = min((v - good) / denom, 0.20)
                 return min(100.0, 85.0 + (excess_pct / 0.20) * 15.0)
             elif v >= caution:
                 # Yellow: linear 50→85
                 t = (v - caution) / (good - caution)
                 return 50.0 + t * 35.0
             else:
-                # Red: linear 0→50  (v=0 → 0, v=caution → 50)
+                # Red: linear 10→50  (floor at 10 so near-miss reds aren't worthless)
                 t = v / caution if caution > 0 else 0.0
-                return max(0.0, t * 50.0)
+                return max(10.0, 10.0 + t * 40.0)
 
         else:  # lower_better
             good    = self.good    if self.good    is not None else 15.0
@@ -141,10 +136,10 @@ class Norm:
                 t = (v - good) / (caution - good)
                 return 85.0 - t * 35.0
             else:
-                # Red: 50→0.  Assume 3× the caution value = score of 0.
+                # Red: 50→10.  Assume 3× the caution value = score of 10.
                 red_max = caution * 3.0
-                t = min(1.0, (v - caution) / (red_max - caution))
-                return max(0.0, 50.0 - t * 50.0)
+                t = min(1.0, (v - caution) / max(red_max - caution, 0.0001))
+                return max(10.0, 50.0 - t * 40.0)
 
 
 # ─── Normative database ───────────────────────────────────────────────────────
@@ -221,6 +216,13 @@ NORMS: Dict[str, Norm] = {
         good=60, caution=45, units="°", direction="higher_better",
         citation="Paterno 2010 AJSM",
         notes="Low flexion indicates a stiff landing strategy with higher joint loads",
+    ),
+
+    # ── Triple Hop ──────────────────────────────────────────────────────────
+    "triple_hop_lsi": Norm(
+        name="LSI — Triple Hop for Distance",
+        good=90, caution=75, units="%", direction="higher_better",
+        citation="Noyes et al. 1991 AJSM",
     ),
 
     # ── Single-Leg Jump ──────────────────────────────────────────────────────
@@ -331,16 +333,15 @@ def time_factor(months: float) -> float:
 
 def time_grade_cap(months: float) -> Optional[str]:
     """
-    Return the maximum allowable grade based on time alone, or None
-    if time is not a limiting factor.
+    Hard cap only for physiologically too-early presentations (<6 months).
+    Above 6 months the time_factor() does the work — the referring clinician
+    already knows how long it has been; the score should reflect performance.
     """
     if months is None:
         return None
     if months < 6:
         return "Not Ready"
-    if months < 9:
-        return "Caution"
-    return None   # performance-driven above 9 months
+    return None   # performance-driven at ≥ 6 months
 
 
 # ─── RTR Composite Score ──────────────────────────────────────────────────────
@@ -349,37 +350,53 @@ def time_grade_cap(months: float) -> Optional[str]:
 # Weights represent clinical importance; they are re-normalised to the
 # subset of available metrics at run-time (so missing tests don't dilute).
 RTR_WEIGHTS = {
+    # ── Single-leg functional power ── PRIMARY PREDICTOR ─────────────────────
+    # Grindem 2016 BJSM: LSI < 90% on ANY hop test → 4× re-injury risk.
+    # Single strongest return-to-sport performance criterion in the literature.
+    "sl_jump_lsi":       ("sl_jump_height_lsi",   0.22),
+
+    # ── Kinematics / injury mechanism ─────────────────────────────────────────
+    # Hewett 2005 AJSM: valgus moment is the primary ACL injury mechanism.
+    # Kinematic quality during high-demand tasks is a direct re-injury predictor.
+    "knee_valgus_surg":  ("peak_knee_valgus",     0.12),
+
     # ── Bilateral reactive loading ────────────────────────────────────────────
-    "drop_jump_rsi":     ("drop_jump_rsi",        0.12),   # overall reactive capacity
-    "landing_lsi":       ("landing_lsi_200ms",    0.10),   # bilateral landing symmetry
-    "rfd_lsi":           ("lsi_rfd",              0.08),   # rate of force development
-
-    # ── Propulsive strength & symmetry ───────────────────────────────────────
-    "peak_grf_lsi":      ("lsi_general",          0.08),   # bilateral peak force sym
-    "sl_jump_lsi":       ("sl_jump_height_lsi",   0.14),   # single-leg functional power
-
-    # ── Kinematics ───────────────────────────────────────────────────────────
-    "knee_valgus_surg":  ("peak_knee_valgus",     0.10),   # re-injury mechanism marker
+    "drop_jump_rsi":     ("drop_jump_rsi",        0.12),   # reactive strength (sport-specific demand)
+    "landing_lsi":       ("landing_lsi_200ms",    0.10),   # bilateral loading symmetry at impact
 
     # ── Neuromuscular control / balance ──────────────────────────────────────
-    "cop_velocity_lsi":  ("cop_velocity_lsi",     0.10),   # LSI symmetry
-    "cop_vel_surg_abs":  ("cop_velocity_abs",     0.08),   # absolute surgical limb
-    "cop_vel_ns_abs":    ("cop_velocity_abs",     0.04),   # absolute non-surgical limb
+    # NOTE: Absolute COP velocity intentionally excluded — V3D exports
+    # total-path-length ÷ trial-time (~400–700 mm/s), which is a different
+    # scale from published normative (10–15 mm/s instantaneous velocity).
+    # LSI symmetry captures the meaningful between-limb comparison.
+    "cop_velocity_lsi":  ("cop_velocity_lsi",     0.10),   # bilateral COP symmetry
 
-    # ── Endurance / fatigue ───────────────────────────────────────────────────
-    "endurance_lsi":     ("endurance_mean_lsi",   0.08),   # mean symmetry under fatigue
-    "fatigue_drift":     ("endurance_fatigue_drift", 0.08), # does LSI worsen under load?
+    # ── Bilateral force quality ───────────────────────────────────────────────
+    "peak_grf_lsi":      ("lsi_general",          0.08),   # peak force symmetry (drop jump)
+    "rfd_lsi":           ("lsi_rfd",              0.06),   # rate of force development
+
+    # ── Endurance / fatigue resistance ────────────────────────────────────────
+    "endurance_lsi":     ("endurance_mean_lsi",   0.10),   # symmetry under repeated loading
+    "fatigue_drift":     ("endurance_fatigue_drift", 0.06), # does LSI worsen under fatigue?
+
+    # ── Drop landing ─────────────────────────────────────────────────────────
+    "dl_peak_grf_lsi":   ("lsi_general",          0.06),   # absorptive landing symmetry
+    "dl_load_rate_lsi":  ("lsi_rfd",              0.04),   # landing load rate symmetry
+    # Weights sum to 1.06; engine renormalises to available metrics at run-time.
+    # Triple Hop for Distance is NOT included in the composite score — it is
+    # displayed in the report and LSI table as supplemental context only.
 }
 
-# Penalty multiplier for each additional red metric.
-# Thresholds chosen so 1 red → can't be "Ready"; 3 reds → can't be "Progressing".
+# Penalty multiplier per red metric count.
+# One borderline red should not collapse an otherwise strong score.
+# Three or more genuine reds still carry a meaningful penalty.
 _RED_PENALTY = [
-    1.00,   # 0 reds
-    0.88,   # 1 red
-    0.76,   # 2 reds
-    0.65,   # 3 reds
-    0.55,   # 4 reds
-    0.46,   # 5 reds
+    1.00,   # 0 reds — no penalty
+    0.95,   # 1 red  — mild flag; one deficit doesn't override a strong profile
+    0.89,   # 2 reds — moderate; two deficits warrant clinical attention
+    0.83,   # 3 reds — significant; multiple domains failing
+    0.77,   # 4 reds
+    0.71,   # 5+ reds
 ]
 
 
@@ -446,9 +463,9 @@ def compute_rtr_score(metric_values: dict) -> dict:
     # ── Step 4: Grade (with hard time cap below 9 months) ────────────────────
     cap = time_grade_cap(months_post_op)
 
-    if final_score >= 83:
+    if final_score >= 95:
         grade = "Ready"
-    elif final_score >= 66:
+    elif final_score >= 68:
         grade = "Progressing"
     elif final_score >= 50:
         grade = "Caution"
@@ -475,7 +492,7 @@ def compute_rtr_score(metric_values: dict) -> dict:
                          f"(Kyritsis 2016 BJSM). Grade capped at Caution.")
         elif months_post_op < 12:
             time_note = (f"{months_post_op:.1f} months post-op — within evidence window. "
-                         f"RTR possible if all performance criteria met.")
+                         f"RTS possible if all performance criteria met.")
         else:
             time_note = (f"{months_post_op:.1f} months post-op — time no longer "
                          f"the limiting factor; performance criteria are decisive.")

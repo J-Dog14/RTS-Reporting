@@ -155,6 +155,7 @@ EXPORT_FILES = {
     "endurance_forces":      "Endurance Forces.txt",
     "endurance_cofp":        "Endurance COFP.txt",
     "endurance_joints":      "Endurance Joints.txt",
+    "endurance_moments":     "Endurance Moments.txt",
 
     # Single-Leg Vertical Jump — Left
     # Note: Data.txt uses full name; Forces/COFP/Joints use abbreviated "SLVL"
@@ -162,12 +163,14 @@ EXPORT_FILES = {
     "sl_left_forces":        "SLVL Forces.txt",
     "sl_left_cofp":          "SLVL COFP.txt",
     "sl_left_joints":        "SLVL Joints.txt",
+    "sl_left_moments":       "SLVL Moments.txt",
 
     # Single-Leg Vertical Jump — Right
     "sl_right_data":         "Single Leg Vertical Right Data.txt",
     "sl_right_forces":       "SLVR Forces.txt",
     "sl_right_cofp":         "SLVR COFP.txt",
     "sl_right_joints":       "SLVR Joints.txt",
+    "sl_right_moments":      "SLVR Moments.txt",
 
     # Proprioception — Control Left trials
     "pctl1_data":            "PCTL1 Data.txt",
@@ -223,10 +226,13 @@ COLORS = {
     # ── Branding / page design ────────────────────────────────────────────────
     "header_bg": "#39414a",   # charcoal — page headers, section bars
     "header_fg": "#FFFFFF",
+    "table_header_fg": "#FFFFFF",  # column header text in metric tables
     "accent":    "#fc6c0f",   # brand orange — used sparingly (badges, highlights)
     "grid":      "#E8E8E8",
     "text":      "#2c2c2c",
-    "lt_grey":   "#F5F5F5",
+    "lt_grey":   "#F5F5F5",   # light grey — alternating table rows, backgrounds
+    "mid_grey":  "#CCCCCC",   # medium grey — borders, dividers
 }
 
-PAGE_SIZE = "letter"   # "letter" or "A4"
+# Page size: "letter" (US, 8.5×11) or "A4"
+PAGE_SIZE = "letter"

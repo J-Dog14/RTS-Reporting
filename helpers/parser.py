@@ -199,15 +199,19 @@ class V3DExport:
     def get_hip(self, side: str) -> dict:
         """
         Return hip kinematics for one side.
-        V3D exports only the Y component (abduction/adduction) for hip.
-        Output dict key: 'flex_ext' mapped to the Y component.
+        V3D hip angle convention: X = flexion/extension, Y = ab/adduction, Z = int/ext rotation.
+        Keys returned: 'flex_ext', 'ab_adduction', 'int_ext_rot' (all optional).
         """
         side = side.upper()
         prefix = "L" if side == "L" else "R"
         sig = f"{prefix}_Hip_Angle"
         out = {}
+        x = self.timeseries(sig, "X")
+        if x is not None: out["flex_ext"]    = x
         y = self.timeseries(sig, "Y")
-        if y is not None: out["flex_ext"] = y
+        if y is not None: out["ab_adduction"] = y
+        z = self.timeseries(sig, "Z")
+        if z is not None: out["int_ext_rot"]  = z
         return out
 
     def get_ankle(self, side: str) -> dict:

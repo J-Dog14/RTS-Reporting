@@ -415,6 +415,157 @@ def _ask_surgery_date(patient_name: str) -> str:
         return ""
 
 
+def _parse_triple_hop(raw: str) -> float:
+    """
+    Parse a triple-hop distance in FEET.INCHES format → total inches.
+
+    Rules:
+      "11.11"  → 11 ft 11 in → 143 in   (decimal digits are literal inches)
+      "11.1"   → 11 ft  1 in → 133 in
+      "11.10"  → 11 ft 10 in → 142 in
+      "11"     → 11 ft  0 in → 132 in   (no decimal = 0 inches)
+      "143"    → treated as already-inches if > 30 ft (unrealistic feet value)
+
+    Returns float inches, or None if unparseable.
+    """
+    s = raw.strip().replace("'", "").replace('"', "").replace(",", ".")
+    if not s:
+        return None
+    try:
+        if "." in s:
+            feet_str, inch_str = s.split(".", 1)
+            feet  = int(feet_str)
+            # The digits AFTER the decimal are literal inches (not a fraction)
+            # "1" → 1 inch, "10" → 10 inches, "01" → 1 inch
+            inches = int(inch_str.lstrip("0") or "0")
+        else:
+            feet   = int(s)
+            inches = 0
+        total_in = feet * 12 + inches
+        if total_in <= 0:
+            return None
+        return float(total_in)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _ask_triple_hop(patient_name: str) -> dict:
+    """
+    Branded dialog: two entry fields for surgical and non-surgical triple-hop
+    distances (in feet.inches format).  Returns dict with keys:
+        surg_in, ns_in, lsi    (all floats, or None if skipped)
+    """
+    BG      = "#39414a"
+    BG_DARK = "#2a3038"
+    FG      = "#ffffff"
+    FG_SUB  = "#c8cdd3"
+    ORANGE  = "#fc6c0f"
+
+    result = {"surg_in": None, "ns_in": None, "lsi": None}
+
+    try:
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.withdraw()
+
+        win = tk.Toplevel(root)
+        win.title("RTS Reporting — Triple Hop for Distance")
+        win.resizable(False, False)
+        win.configure(bg=BG)
+        win.lift()
+        win.attributes("-topmost", True)
+        win.focus_force()
+
+        W, H = 420, 310
+        win.update_idletasks()
+        sx = (win.winfo_screenwidth()  - W) // 2
+        sy = (win.winfo_screenheight() - H) // 2
+        win.geometry(f"{W}x{H}+{sx}+{sy}")
+
+        confirmed = [False]
+
+        tk.Label(win, text=CLINIC_NAME,
+                 bg=BG, fg=FG, font=("Helvetica", 13, "bold")).pack(pady=(14, 2))
+        tk.Label(win, text="Triple Hop for Distance",
+                 bg=BG, fg=FG_SUB, font=("Helvetica", 9)).pack()
+        tk.Label(win, text=f"Patient:  {patient_name}",
+                 bg=BG, fg=FG, font=("Helvetica", 10)).pack(pady=(6, 2))
+        tk.Label(win,
+                 text="Enter best hop distance: FEET.INCHES\n"
+                      "  e.g.  11.11 = 11 ft 11 in  |  11.1 = 11 ft 1 in\n"
+                      "Press Enter to confirm · Esc to skip",
+                 bg=BG, fg=FG_SUB, font=("Helvetica", 8), justify="center").pack(pady=(4, 8))
+
+        # ── Entry fields ──────────────────────────────────────────────────────
+        row_frame = tk.Frame(win, bg=BG)
+        row_frame.pack()
+
+        def _entry_col(parent, label_text):
+            f = tk.Frame(parent, bg=BG)
+            f.pack(side="left", padx=18)
+            tk.Label(f, text=label_text, bg=BG, fg=FG_SUB,
+                     font=("Helvetica", 9)).pack()
+            var = tk.StringVar()
+            e = tk.Entry(f, textvariable=var,
+                         font=("Helvetica", 14, "bold"), justify="center",
+                         width=10, bd=0, relief="flat",
+                         bg=BG_DARK, fg=FG, insertbackground=ORANGE)
+            e.pack(ipady=6)
+            return var, e
+
+        surg_label = "Surgical Limb"
+        ns_label   = "Non-Surgical"
+        surg_var, surg_entry = _entry_col(row_frame, surg_label)
+        ns_var,   ns_entry   = _entry_col(row_frame, ns_label)
+
+        def _submit(event=None):
+            sv = _parse_triple_hop(surg_var.get())
+            nv = _parse_triple_hop(ns_var.get())
+            bad_s = sv is None and surg_var.get().strip()
+            bad_n = nv is None and ns_var.get().strip()
+            if bad_s:
+                surg_entry.configure(bg="#5a2a2a")
+                surg_entry.after(600, lambda: surg_entry.configure(bg=BG_DARK))
+            if bad_n:
+                ns_entry.configure(bg="#5a2a2a")
+                ns_entry.after(600, lambda: ns_entry.configure(bg=BG_DARK))
+            if bad_s or bad_n:
+                return
+            result["surg_in"] = sv
+            result["ns_in"]   = nv
+            if sv and nv and nv > 0:
+                result["lsi"] = round(sv / nv * 100.0, 1)
+            confirmed[0] = True
+            win.destroy()
+
+        def _skip(event=None):
+            confirmed[0] = True
+            win.destroy()
+
+        surg_entry.bind("<Return>", lambda e: ns_entry.focus_set())
+        ns_entry.bind("<Return>", _submit)
+        win.bind("<Escape>", _skip)
+        surg_entry.focus_set()
+
+        btn_frame = tk.Frame(win, bg=BG)
+        btn_frame.pack(pady=12)
+        tk.Button(btn_frame, text="Confirm", command=_submit,
+                  bg=ORANGE, fg=FG, font=("Helvetica", 10, "bold"),
+                  relief="flat", cursor="hand2", padx=16).pack(side="left", padx=8)
+        tk.Button(btn_frame, text="Skip", command=_skip,
+                  bg=BG_DARK, fg=FG_SUB, font=("Helvetica", 10),
+                  relief="flat", cursor="hand2", padx=16).pack(side="left", padx=8)
+
+        root.wait_window(win)
+        root.destroy()
+        return result
+
+    except Exception as exc:
+        print(f"[main] WARNING: Could not show triple-hop dialog ({exc}). Skipping.")
+        return result
+
+
 def _months_since(date_str: str, reference: datetime.date = None) -> float:
     """
     Parse surgery date: YYYY-MM-DD, MM/DD/YY(Y), or MM/YY(Y).
@@ -546,6 +697,10 @@ def _get_hip(joints: V3DExport, side: str) -> dict:
     return joints.get_hip(side) if joints else {}
 
 
+def _get_ankle(joints: V3DExport, side: str) -> dict:
+    return joints.get_ankle(side) if joints else {}
+
+
 def _scalars(data_export: V3DExport) -> dict:
     """Flat dict of all scalar values from a Data.txt file."""
     return data_export.all_scalars() if data_export else {}
@@ -564,6 +719,19 @@ def _cofp_mm(export: V3DExport, plate: str, component: str) -> np.ndarray:
     if arr is None:
         return None
     return arr * COFP_TO_MM
+
+
+def _peak_knee_moment(moments_export: V3DExport, side: str) -> float:
+    """
+    Extract peak knee extension moment (Nm) for the given side from a Moments.txt export.
+    V3D knee moment X component: positive = extension moment (quadriceps demand).
+    Returns NaN if data unavailable.
+    """
+    signal = f"{side.upper()}_Knee_Moment"
+    ts = moments_export.timeseries(signal, "X")
+    if ts is None or len(ts) == 0:
+        return float("nan")
+    return float(np.nanmax(ts))
 
 
 # ─── Main pipeline ────────────────────────────────────────────────────────────
@@ -636,6 +804,14 @@ def run(session_folder: str,
     else:
         print("  Surgery date : unknown (skipped — time modifier not applied)")
 
+    # ── Triple Hop for Distance ────────────────────────────────────────────────
+    triple_hop = _ask_triple_hop(display_name)
+    if triple_hop.get("lsi") is not None:
+        print(f"  Triple Hop   : Surg={triple_hop['surg_in']:.1f}\" "
+              f"NS={triple_hop['ns_in']:.1f}\"  LSI={triple_hop['lsi']:.1f}%")
+    else:
+        print("  Triple Hop   : skipped")
+
     # ── Session date (from embedded C3D paths, fall back to today) ────────────
     # date_str format: MM-DD-YY  e.g. "12-03-25"
     date_str_short = session_info.get("session_date") or \
@@ -679,13 +855,14 @@ def run(session_folder: str,
         "session_dir":        str(folder),
         "surgery_date":       surgery_date_str or "",
         "months_since_surgery": months_post_op,   # float or None
+        "triple_hop":         triple_hop,          # {surg_in, ns_in, lsi} or all None
     }
 
     test_results = {}
     all_signals  = {}   # raw arrays keyed by test name, for figure generation
 
     # ── Drop Jump ─────────────────────────────────────────────────────────────
-    print("[main] ── Drop Jump ──────────────────────────────")
+    print("[main] -- Drop Jump ------------------------------")
     dj_data   = _load(folder, "drop_jump_data",   rate=ANALOG_RATE)
     dj_forces = _load(folder, "drop_jump_forces",  rate=ANALOG_RATE)
     dj_joints = _load(folder, "drop_jump_joints",  rate=KINEMATIC_RATE)
@@ -716,13 +893,29 @@ def run(session_folder: str,
             res.contact_time_s = float(sc["CT"])
 
         test_results["drop_jump"] = res
+        dj_cofp    = _load(folder, "drop_jump_cofp",    rate=ANALOG_RATE)
+        dj_moments = _load(folder, "drop_jump_moments", rate=KINEMATIC_RATE)
+        ankle_surg_dj  = _get_ankle(dj_joints, side)
+        ankle_ns_dj    = _get_ankle(dj_joints, ns)
         all_signals["drop_jump"] = {
-            "fz_surg":          fz_s,
-            "fz_ns":            fz_ns,
-            "knee_flex_surg":   knee_surg_dj.get("flex_ext"),
-            "knee_flex_ns":     knee_ns_dj.get("flex_ext"),
-            "knee_valgus_surg": knee_surg_dj.get("valgus"),
-            "knee_valgus_ns":   knee_ns_dj.get("valgus"),
+            "fz_surg":           fz_s,
+            "fz_ns":             fz_ns,
+            "knee_flex_surg":    knee_surg_dj.get("flex_ext"),
+            "knee_flex_ns":      knee_ns_dj.get("flex_ext"),
+            "knee_valgus_surg":  knee_surg_dj.get("valgus"),
+            "knee_valgus_ns":    knee_ns_dj.get("valgus"),
+            "tib_rot_surg":      knee_surg_dj.get("tib_rot"),
+            "tib_rot_ns":        knee_ns_dj.get("tib_rot"),
+            "ankle_flex_surg":   ankle_surg_dj.get("flex_ext"),
+            "ankle_flex_ns":     ankle_ns_dj.get("flex_ext"),
+            "hip_add_surg":      hip_surg_dj.get("ab_adduction"),
+            "hip_add_ns":        hip_ns_dj.get("ab_adduction"),
+            "hip_ir_surg":       hip_surg_dj.get("int_ext_rot"),
+            "hip_ir_ns":         hip_ns_dj.get("int_ext_rot"),
+            "cop_y_surg":        _cofp_mm(dj_cofp, _surg_plate(side), "Y"),
+            "cop_y_ns":          _cofp_mm(dj_cofp, _ns_plate(side),   "Y"),
+            "knee_moment_surg":  _peak_knee_moment(dj_moments, side),
+            "knee_moment_ns":    _peak_knee_moment(dj_moments, ns),
         }
         print(f"  RSI           = {res.rsi:.3f}")
         print(f"  Jump height   = {res.jump_height_cm:.2f} (V3D units)")
@@ -734,7 +927,7 @@ def run(session_folder: str,
     print()
 
     # ── Drop Landing ──────────────────────────────────────────────────────────
-    print("[main] ── Drop Landing ───────────────────────────")
+    print("[main] -- Drop Landing ---------------------------")
     dl_data   = _load(folder, "drop_landing_data",   rate=ANALOG_RATE)
     dl_forces = _load(folder, "drop_landing_forces",  rate=ANALOG_RATE)
     dl_joints = _load(folder, "drop_landing_joints",  rate=KINEMATIC_RATE)
@@ -757,13 +950,29 @@ def run(session_folder: str,
             rate_k=KINEMATIC_RATE, scalars=sc,
         )
         test_results["drop_landing"] = res
+        dl_cofp    = _load(folder, "drop_landing_cofp",    rate=ANALOG_RATE)
+        dl_moments = _load(folder, "drop_landing_moments", rate=KINEMATIC_RATE)
+        ankle_surg_dl  = _get_ankle(dl_joints, side)
+        ankle_ns_dl    = _get_ankle(dl_joints, ns)
         all_signals["drop_landing"] = {
-            "fz_surg":          fz_s,
-            "fz_ns":            fz_ns,
-            "knee_flex_surg":   knee_surg_dl.get("flex_ext"),
-            "knee_flex_ns":     knee_ns_dl.get("flex_ext"),
-            "knee_valgus_surg": knee_surg_dl.get("valgus"),
-            "knee_valgus_ns":   knee_ns_dl.get("valgus"),
+            "fz_surg":           fz_s,
+            "fz_ns":             fz_ns,
+            "knee_flex_surg":    knee_surg_dl.get("flex_ext"),
+            "knee_flex_ns":      knee_ns_dl.get("flex_ext"),
+            "knee_valgus_surg":  knee_surg_dl.get("valgus"),
+            "knee_valgus_ns":    knee_ns_dl.get("valgus"),
+            "tib_rot_surg":      knee_surg_dl.get("tib_rot"),
+            "tib_rot_ns":        knee_ns_dl.get("tib_rot"),
+            "ankle_flex_surg":   ankle_surg_dl.get("flex_ext"),
+            "ankle_flex_ns":     ankle_ns_dl.get("flex_ext"),
+            "hip_add_surg":      hip_surg_dl.get("ab_adduction"),
+            "hip_add_ns":        hip_ns_dl.get("ab_adduction"),
+            "hip_ir_surg":       hip_surg_dl.get("int_ext_rot"),
+            "hip_ir_ns":         hip_ns_dl.get("int_ext_rot"),
+            "cop_y_surg":        _cofp_mm(dl_cofp, _surg_plate(side), "Y"),
+            "cop_y_ns":          _cofp_mm(dl_cofp, _ns_plate(side),   "Y"),
+            "knee_moment_surg":  _peak_knee_moment(dl_moments, side),
+            "knee_moment_ns":    _peak_knee_moment(dl_moments, ns),
         }
         print(f"  Impact LSI    = {res.impact_transient_lsi:.1f}%")
         print(f"  Load rate LSI = {res.loading_rate_lsi:.1f}%")
@@ -773,7 +982,7 @@ def run(session_folder: str,
     print()
 
     # ── Max Vertical Jump ─────────────────────────────────────────────────────
-    print("[main] ── Max Vertical Jump ──────────────────────")
+    print("[main] -- Max Vertical Jump ----------------------")
     mv_data   = _load(folder, "vertical_data",   rate=ANALOG_RATE)
     mv_forces = _load(folder, "vertical_forces",  rate=ANALOG_RATE)
     mv_joints = _load(folder, "vertical_joints",  rate=KINEMATIC_RATE)
@@ -811,11 +1020,29 @@ def run(session_folder: str,
             res.peak_force_lsi    = _lsi(pk_surg, pk_ns)
 
         test_results["max_vertical"] = res
+        mv_cofp    = _load(folder, "vertical_cofp",    rate=ANALOG_RATE)
+        mv_moments = _load(folder, "vertical_moments", rate=KINEMATIC_RATE)
+        ankle_surg_mv  = _get_ankle(mv_joints, side)
+        ankle_ns_mv    = _get_ankle(mv_joints, ns)
         all_signals["max_vertical"] = {
-            "fz_surg":          fz_s,
-            "fz_ns":            fz_ns,
-            "knee_flex_surg":   knee_surg_mv.get("flex_ext"),
-            "knee_flex_ns":     knee_ns_mv.get("flex_ext"),
+            "fz_surg":           fz_s,
+            "fz_ns":             fz_ns,
+            "knee_flex_surg":    knee_surg_mv.get("flex_ext"),
+            "knee_flex_ns":      knee_ns_mv.get("flex_ext"),
+            "knee_valgus_surg":  knee_surg_mv.get("valgus"),
+            "knee_valgus_ns":    knee_ns_mv.get("valgus"),
+            "tib_rot_surg":      knee_surg_mv.get("tib_rot"),
+            "tib_rot_ns":        knee_ns_mv.get("tib_rot"),
+            "ankle_flex_surg":   ankle_surg_mv.get("flex_ext"),
+            "ankle_flex_ns":     ankle_ns_mv.get("flex_ext"),
+            "hip_add_surg":      hip_surg_mv.get("ab_adduction"),
+            "hip_add_ns":        hip_ns_mv.get("ab_adduction"),
+            "hip_ir_surg":       hip_surg_mv.get("int_ext_rot"),
+            "hip_ir_ns":         hip_ns_mv.get("int_ext_rot"),
+            "cop_y_surg":        _cofp_mm(mv_cofp, _surg_plate(side), "Y"),
+            "cop_y_ns":          _cofp_mm(mv_cofp, _ns_plate(side),   "Y"),
+            "knee_moment_surg":  _peak_knee_moment(mv_moments, side),
+            "knee_moment_ns":    _peak_knee_moment(mv_moments, ns),
         }
         print(f"  Jump height   = {res.jump_height_cm:.2f} (V3D units)")
         print(f"  Propulsion LSI= {res.propulsion_lsi:.1f}%")
@@ -825,7 +1052,7 @@ def run(session_folder: str,
     print()
 
     # ── Endurance Squat ───────────────────────────────────────────────────────
-    print("[main] ── Endurance Squat ────────────────────────")
+    print("[main] -- Endurance Squat ------------------------")
     es_forces = _load(folder, "endurance_forces", rate=ANALOG_RATE, verbose=True)
     es_joints = _load(folder, "endurance_joints", rate=KINEMATIC_RATE, verbose=True)
 
@@ -856,9 +1083,15 @@ def run(session_folder: str,
             rate_k=KINEMATIC_RATE,
         )
         test_results["endurance_squat"] = res
+        es_cofp    = _load(folder, "endurance_cofp",    rate=ANALOG_RATE)
+        es_moments = _load(folder, "endurance_moments", rate=KINEMATIC_RATE)
         all_signals["endurance_squat"] = {
-            "fz_surg": fz_s,
-            "fz_ns":   fz_ns,
+            "fz_surg":          fz_s,
+            "fz_ns":            fz_ns,
+            "cop_y_surg":       _cofp_mm(es_cofp, _surg_plate(side), "Y"),
+            "cop_y_ns":         _cofp_mm(es_cofp, _ns_plate(side),   "Y"),
+            "knee_moment_surg": _peak_knee_moment(es_moments, side),
+            "knee_moment_ns":   _peak_knee_moment(es_moments, ns),
         }
         print(f"  Reps detected = {res.n_cycles}")
         print(f"  Mean LSI      = {res.mean_lsi_peak:.1f}%")
@@ -868,7 +1101,7 @@ def run(session_folder: str,
     print()
 
     # ── Single-Leg Vertical Jump ──────────────────────────────────────────────
-    print("[main] ── Single-Leg Vertical Jump ──────────────")
+    print("[main] -- Single-Leg Vertical Jump ---------------")
     sl_l_data   = _load(folder, "sl_left_data",    rate=ANALOG_RATE)
     sl_l_forces = _load(folder, "sl_left_forces",  rate=ANALOG_RATE)
     sl_l_joints = _load(folder, "sl_left_joints",  rate=KINEMATIC_RATE)
@@ -908,13 +1141,41 @@ def run(session_folder: str,
         )
         res = sl_mod.combine(surg_limb, ns_limb)
         test_results["single_leg_jump"] = res
+        # Load per-side COFP and moments (side-specific files for single-leg tests)
+        sl_surg_cofp_key = "sl_left_cofp"  if side == "L" else "sl_right_cofp"
+        sl_ns_cofp_key   = "sl_right_cofp" if side == "L" else "sl_left_cofp"
+        sl_surg_mom_key  = "sl_left_moments"  if side == "L" else "sl_right_moments"
+        sl_ns_mom_key    = "sl_right_moments" if side == "L" else "sl_left_moments"
+        sl_surg_cofp = _load(folder, sl_surg_cofp_key, rate=ANALOG_RATE)
+        sl_ns_cofp   = _load(folder, sl_ns_cofp_key,   rate=ANALOG_RATE)
+        sl_surg_mom  = _load(folder, sl_surg_mom_key,  rate=KINEMATIC_RATE)
+        sl_ns_mom    = _load(folder, sl_ns_mom_key,    rate=KINEMATIC_RATE)
+        # Per-side ankle (joints loaded from SLVL/SLVR files)
+        sl_surg_joints = sl_l_joints if side == "L" else sl_r_joints
+        sl_ns_joints   = sl_r_joints if side == "L" else sl_l_joints
+        ankle_surg_sl  = _get_ankle(sl_surg_joints, side)
+        ankle_ns_sl    = _get_ankle(sl_ns_joints,   ns)
+        hip_surg_sl    = _get_hip(sl_surg_joints, side)
+        hip_ns_sl      = _get_hip(sl_ns_joints,   ns)
         all_signals["single_leg_jump"] = {
-            "fz_surg":          fz_surg_sl,
-            "fz_ns":            fz_ns_sl,
-            "knee_flex_surg":   knee_surg_sl.get("flex_ext"),
-            "knee_flex_ns":     knee_ns_sl.get("flex_ext"),
-            "knee_valgus_surg": knee_surg_sl.get("valgus"),
-            "knee_valgus_ns":   knee_ns_sl.get("valgus"),
+            "fz_surg":           fz_surg_sl,
+            "fz_ns":             fz_ns_sl,
+            "knee_flex_surg":    knee_surg_sl.get("flex_ext"),
+            "knee_flex_ns":      knee_ns_sl.get("flex_ext"),
+            "knee_valgus_surg":  knee_surg_sl.get("valgus"),
+            "knee_valgus_ns":    knee_ns_sl.get("valgus"),
+            "tib_rot_surg":      knee_surg_sl.get("tib_rot"),
+            "tib_rot_ns":        knee_ns_sl.get("tib_rot"),
+            "ankle_flex_surg":   ankle_surg_sl.get("flex_ext"),
+            "ankle_flex_ns":     ankle_ns_sl.get("flex_ext"),
+            "hip_add_surg":      hip_surg_sl.get("ab_adduction"),
+            "hip_add_ns":        hip_ns_sl.get("ab_adduction"),
+            "hip_ir_surg":       hip_surg_sl.get("int_ext_rot"),
+            "hip_ir_ns":         hip_ns_sl.get("int_ext_rot"),
+            "cop_y_surg":        _cofp_mm(sl_surg_cofp, "FP3", "Y"),
+            "cop_y_ns":          _cofp_mm(sl_ns_cofp,   "FP3", "Y"),
+            "knee_moment_surg":  _peak_knee_moment(sl_surg_mom, side),
+            "knee_moment_ns":    _peak_knee_moment(sl_ns_mom,   ns),
         }
         print(f"  Surg jump ht = {res.surgical.jump_height_cm:.2f} (V3D units)")
         print(f"  NS   jump ht = {res.non_surgical.jump_height_cm:.2f} (V3D units)")
@@ -925,7 +1186,7 @@ def run(session_folder: str,
     print()
 
     # ── Proprioception ────────────────────────────────────────────────────────
-    print("[main] ── Proprioception ─────────────────────────")
+    print("[main] -- Proprioception -------------------------")
     #  PCTL1 / PCTR1 = Standard (flat firm ground)
     #  PCTL2 / PCTR2 = Airex bag (unstable foam — harder, higher COP expected)
     pctl1 = _load(folder, "pctl1_cofp", rate=ANALOG_RATE, verbose=True)
@@ -1018,6 +1279,8 @@ def run(session_folder: str,
     # ── RTR composite score ───────────────────────────────────────────────────
     rtr_metrics = _collect_rtr_metrics(test_results)
     rtr_metrics["_months_since_surgery"] = months_post_op  # passed through to scorer
+    if triple_hop.get("lsi") is not None:
+        rtr_metrics["triple_hop_lsi"] = triple_hop["lsi"]
 
     # ── Generate PDF ──────────────────────────────────────────────────────────
     # Filename format: "RTS Report_Temperance Lyons_12-03-25.pdf"
@@ -1042,52 +1305,63 @@ def _collect_rtr_metrics(results: dict) -> dict:
     """Map test results → RTR_WEIGHTS keys for compute_rtr_score()."""
     m = {}
 
+    # ── Drop Jump ─────────────────────────────────────────────────────────────
     dj = results.get("drop_jump")
     if dj:
-        m["drop_jump_rsi"] = dj.rsi
-        m["landing_lsi"]   = dj.landing_lsi_200ms
-        m["rfd_lsi"]       = dj.loading_rate_lsi
+        if not _isnan(dj.rsi):
+            m["drop_jump_rsi"] = dj.rsi
+        if not _isnan(dj.landing_lsi_200ms):
+            m["landing_lsi"] = dj.landing_lsi_200ms
+        if dj.grf_overall and not _isnan(dj.grf_overall.lsi_rfd):
+            m["rfd_lsi"] = dj.grf_overall.lsi_rfd
+        if dj.grf_overall and not _isnan(dj.grf_overall.lsi_peak):
+            m["peak_grf_lsi"] = dj.grf_overall.lsi_peak
+        if dj.kinematics:
+            kin = dj.kinematics
+            if hasattr(kin, "valgus_surg") and not _isnan(kin.valgus_surg):
+                m["knee_valgus_surg"] = abs(kin.valgus_surg)
 
+    # ── Drop Landing ─────────────────────────────────────────────────────────
     dl = results.get("drop_landing")
     if dl:
-        m.setdefault("rfd_lsi", dl.loading_rate_lsi)
+        if not _isnan(dl.peak_force_lsi):
+            m["dl_peak_grf_lsi"] = dl.peak_force_lsi
+        if not _isnan(dl.loading_rate_lsi):
+            m["dl_load_rate_lsi"] = dl.loading_rate_lsi
 
-    mv = results.get("max_vertical")
-    if mv:
-        m["peak_grf_lsi"] = mv.peak_force_lsi
+    # ── Single-Leg Vertical Jump ──────────────────────────────────────────────
+    slj = results.get("single_leg_jump")
+    if slj and not _isnan(slj.lsi_jump_height):
+        m["sl_jump_lsi"] = slj.lsi_jump_height
 
-    es = results.get("endurance_squat")
-    if es:
-        m["fatigue_drift"] = es.fatigue_drift_pct
-        m["endurance_lsi"] = es.mean_lsi_peak
-
-    sl = results.get("single_leg_jump")
-    if sl:
-        m["sl_jump_lsi"] = sl.lsi_jump_height
-
+    # ── Proprioception / Balance ──────────────────────────────────────────────
     prop = results.get("proprioception")
-    if prop:
-        m["cop_velocity_lsi"] = prop.lsi_cop_velocity
-        # Absolute COP velocity (standard condition) — catches "symmetrically poor" balance
-        if prop.standard:
-            if prop.standard.surgical:
-                m["cop_vel_surg_abs"] = prop.standard.surgical.mean_velocity_mm_s
-            if prop.standard.non_surgical:
-                m["cop_vel_ns_abs"] = prop.standard.non_surgical.mean_velocity_mm_s
+    if prop and prop.standard and not _isnan(prop.standard.lsi_cop_velocity):
+        m["cop_velocity_lsi"] = prop.standard.lsi_cop_velocity
 
-    dj = results.get("drop_jump")
-    if dj and dj.kinematics and dj.kinematics.surg_knee:
-        m["knee_valgus_surg"] = dj.kinematics.surg_knee.peak_valgus_deg
+    # ── Endurance Squat ───────────────────────────────────────────────────────
+    end = results.get("endurance")
+    if end:
+        if not _isnan(end.mean_lsi_peak):
+            m["endurance_lsi"] = end.mean_lsi_peak
+        if not _isnan(end.fatigue_drift_pct):
+            m["fatigue_drift"] = end.fatigue_drift_pct
 
     return m
 
 
-# ─── Entry point ──────────────────────────────────────────────────────────────
+def _isnan(v) -> bool:
+    """Return True if v is None or a float NaN."""
+    if v is None:
+        return True
+    try:
+        import math
+        return math.isnan(float(v))
+    except (TypeError, ValueError):
+        return True
+
 
 if __name__ == "__main__":
-    if len(sys.argv) >= 4:
-        run(sys.argv[1], patient_name=sys.argv[2], surg_side=sys.argv[3])
-    elif len(sys.argv) == 2:
-        run(sys.argv[1])
-    else:
-        run(SESSION_FOLDER)
+    # CLI: python main.py "D:\path\to\session"
+    session = sys.argv[1] if len(sys.argv) > 1 else SESSION_FOLDER
+    run(session_folder=session)

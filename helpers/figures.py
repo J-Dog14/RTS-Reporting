@@ -103,6 +103,9 @@ def joint_angle_overlay(
     title: str = "Knee Flexion",
     ylabel: str = "Angle (°)",
     figsize: tuple = (7, 3),
+    dir_low: str = "",    # label at low end of y-axis (e.g. "← More Extended")
+    dir_high: str = "",   # label at high end of y-axis (e.g. "More Flexed →")
+    show_legend: bool = False,  # legend off by default for kinematic panels
 ) -> plt.Figure:
     """Bilateral joint angle overlay, surgical vs. non-surgical."""
     fig, ax = plt.subplots(figsize=figsize, facecolor="white")
@@ -118,7 +121,22 @@ def joint_angle_overlay(
     _plot(angle_surg, COLORS["surgical"], "Surgical")
     _plot(angle_ns,   COLORS["non_surg"], "Non-Surgical")
     ax.axhline(0, color="#CCCCCC", linewidth=0.6)
-    ax.legend(fontsize=8, framealpha=0.4)
+    if show_legend:
+        ax.legend(fontsize=8, framealpha=0.4)
+
+    # Directional cue annotations on the y-axis
+    if dir_low or dir_high:
+        ymin, ymax = ax.get_ylim()
+        xmin = ax.get_xlim()[0]
+        pad = (ymax - ymin) * 0.03
+        if dir_high:
+            ax.text(xmin, ymax - pad, dir_high,
+                    ha="left", va="top", fontsize=6.5,
+                    color="#888888", style="italic")
+        if dir_low:
+            ax.text(xmin, ymin + pad, dir_low,
+                    ha="left", va="bottom", fontsize=6.5,
+                    color="#888888", style="italic")
 
     fig.tight_layout(pad=1.5)
     return fig
@@ -240,6 +258,79 @@ def cop_scatter(
     return fig
 
 
+# ─── Bilateral COP AP trace (movement tests) ─────────────────────────────────
+
+def cop_bilateral_ap_trace(
+    cop_y_surg: np.ndarray,
+    cop_y_ns:   np.ndarray,
+    fz_surg:    np.ndarray = None,
+    fz_ns:      np.ndarray = None,
+    rate: float = 1000.0,
+    title: str  = "COP Anterior-Posterior Displacement",
+    figsize: tuple = (7.5, 2.0),
+) -> plt.Figure:
+    """
+    Overlay AP COP displacement for surgical and non-surgical limbs.
+
+    V3D exports COP in global lab coordinates, so raw values are large absolute
+    numbers (e.g. 1900–2200 mm from lab origin).  We zero-centre each limb by
+    subtracting its own contact-phase mean, converting the trace to *relative
+    displacement* from the foot's neutral position.  This reveals:
+      • How far the COP travels fore-aft during the movement (excursion)
+      • Whether one limb's COP is biased anterior or posterior vs its midpoint
+      • Asymmetric excursion = restricted / guarded loading strategy
+    """
+    GRF_THRESH = 30.0   # N — below this = no meaningful plate contact
+
+    fig, ax = plt.subplots(figsize=figsize, facecolor="white")
+
+    def _prep(cop_y, fz):
+        """Return (time, zero-centred displacement) masking non-contact frames."""
+        if cop_y is None or len(cop_y) == 0:
+            return None, None
+        t = np.arange(len(cop_y)) / rate
+        y = cop_y.astype(float).copy()
+        # build contact mask
+        if fz is not None and len(fz) == len(y):
+            contact = fz >= GRF_THRESH
+        else:
+            contact = np.abs(y) > 1e-9
+        # zero-centre using the mean of contact frames
+        contact_mean = np.nanmean(y[contact]) if contact.any() else np.nanmean(y)
+        y -= contact_mean
+        # mask non-contact to NaN so gaps appear in the plot
+        y[~contact] = np.nan
+        return t, y
+
+    t_s, y_s = _prep(cop_y_surg, fz_surg)
+    t_n, y_n = _prep(cop_y_ns,   fz_ns)
+
+    for t, y, color, label in [
+        (t_s, y_s, COLORS["surgical"], "Surgical"),
+        (t_n, y_n, COLORS["non_surg"], "Non-Surg"),
+    ]:
+        if t is None:
+            continue
+        ax.plot(t, y, color=color, linewidth=1.0, alpha=0.85, label=label)
+        excursion = np.nanmax(y) - np.nanmin(y)
+        if not np.isnan(excursion):
+            ax.annotate(f"{label}: {excursion:.0f} mm range",
+                        xy=(0.02 if label == "Surgical" else 0.02,
+                            0.92 if label == "Surgical" else 0.78),
+                        xycoords="axes fraction",
+                        fontsize=7, color=color,
+                        fontweight="bold")
+
+    ax.axhline(0, color="#AAAAAA", linewidth=0.8, linestyle=":", zorder=0,
+               label="Neutral (contact mean)")
+    _style(ax, title=title,
+           ylabel="AP Displacement (mm)\n← Posterior   Anterior →",
+           xlabel="Time (s)")
+    ax.legend(fontsize=6.5, loc="upper right")
+    fig.tight_layout(pad=0.8)
+    return fig
+
+
 # ─── Endurance squat: LSI over time ──────────────────────────────────────────
 
 def endurance_lsi_over_time(
@@ -291,7 +382,7 @@ def rtr_radar(
 ) -> plt.Figure:
     """Spider chart summarising performance across domains (0–100)."""
     cats   = list(domain_scores.keys())
-    vals   = [float(domain_scores[k]) for k in cats]
+    vals   = [min(float(domain_scores[k]), 100.0) for k in cats]   # cap at 100
     n = len(cats)
 
     if n < 3:
@@ -321,11 +412,106 @@ def rtr_radar(
 
     ax.set_xticks(angles)
     ax.set_xticklabels(cats, size=8, color=COLORS["text"])
-    ax.set_ylim(0, 105)
+    ax.set_ylim(0, 100)
     ax.set_yticks([25, 50, 75, 90])
     ax.set_yticklabels(["25", "50", "75", "90"], size=6, color="#AAAAAA")
     ax.spines["polar"].set_visible(False)
     ax.set_title(title, size=11, fontweight="bold", color=COLORS["text"], pad=20)
 
     fig.tight_layout()
+    return fig
+
+
+# ─── Endurance squat: bilateral COP drift across 30 s ────────────────────────
+
+def endurance_cop_drift(
+    cop_y_surg: np.ndarray,
+    cop_y_ns:   np.ndarray,
+    fz_surg:    np.ndarray = None,
+    fz_ns:      np.ndarray = None,
+    rate: float = 1000.0,
+    title: str  = "Endurance Squat — Bilateral AP COP Drift (30 s)",
+    figsize: tuple = (7.5, 2.0),
+) -> plt.Figure:
+    """
+    Shows how each limb's AP COP evolves across the full 30-second endurance squat.
+
+    During fatigue, patients typically shift load away from the surgical limb —
+    this appears as the surgical-side COP amplitude *shrinking* or trending
+    posterior while the non-surgical side increases.  A smoothed envelope (running
+    RMS per 1-second window) is overlaid so the fatigue trajectory is visible
+    through the high-frequency squat oscillations.
+
+    The raw per-frame trace is plotted lightly in the background; a 1 s rolling
+    RMS envelope (solid, bolder line) highlights the trend.
+    """
+    GRF_THRESH = 30.0
+
+    fig, ax = plt.subplots(figsize=figsize, facecolor="white")
+
+    def _prep(cop_y, fz):
+        if cop_y is None or len(cop_y) == 0:
+            return None, None
+        t = np.arange(len(cop_y)) / rate
+        y = cop_y.astype(float).copy()
+        if fz is not None and len(fz) == len(y):
+            contact = fz >= GRF_THRESH
+        else:
+            contact = np.abs(y) > 1e-9
+        if not contact.any():
+            return None, None
+        # zero-centre using contact-phase mean of entire trial
+        contact_mean = np.nanmean(y[contact])
+        y -= contact_mean
+        y[~contact] = np.nan
+        return t, y
+
+    def _rolling_rms(y, window_frames):
+        """1-D rolling RMS — ignores NaN."""
+        n = len(y)
+        out = np.full(n, np.nan)
+        hw  = window_frames // 2
+        for i in range(n):
+            chunk = y[max(0, i - hw): min(n, i + hw)]
+            valid = chunk[~np.isnan(chunk)]
+            if len(valid) > 0:
+                out[i] = float(np.sqrt(np.mean(valid ** 2)))
+        return out
+
+    window = int(rate)   # 1-second rolling window
+
+    for cop_y, fz, color, label in [
+        (cop_y_surg, fz_surg, COLORS["surgical"], "Surgical"),
+        (cop_y_ns,   fz_ns,   COLORS["non_surg"], "Non-Surg"),
+    ]:
+        t, y = _prep(cop_y, fz)
+        if t is None:
+            continue
+        # Raw trace (very light)
+        ax.plot(t, y, color=color, linewidth=0.5, alpha=0.25)
+        # RMS envelope
+        rms = _rolling_rms(y, window)
+        ax.plot(t, rms, color=color, linewidth=1.8, alpha=0.90,
+                label=f"{label} (RMS envelope)")
+        # Annotate early vs late RMS to quantify fatigue shift
+        early = rms[: int(rate * 5)]   # first 5 s
+        late  = rms[-int(rate * 5):]   # last 5 s
+        early_m = np.nanmean(early)
+        late_m  = np.nanmean(late)
+        if not np.isnan(early_m) and not np.isnan(late_m):
+            delta_pct = (late_m - early_m) / (early_m + 1e-9) * 100
+            sign = "+" if delta_pct >= 0 else ""
+            ax.annotate(
+                f"{label}: {sign}{delta_pct:.0f}% shift",
+                xy=(t[-1], rms[-1] if not np.isnan(rms[-1]) else 0),
+                xycoords="data", fontsize=6.5, color=color, fontweight="bold",
+                ha="right", va="bottom",
+            )
+
+    ax.axhline(0, color="#AAAAAA", linewidth=0.7, linestyle=":", zorder=0)
+    _style(ax, title=title,
+           ylabel="AP Displacement RMS (mm)",
+           xlabel="Time (s)")
+    ax.legend(fontsize=6.5, loc="upper left")
+    fig.tight_layout(pad=0.8)
     return fig
