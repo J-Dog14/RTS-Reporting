@@ -299,6 +299,7 @@ def _header(s: dict, name: str, dob: str, side: str,
     subtitle_style = ParagraphStyle(
         "hdr_subtitle_r", fontSize=12, fontName="Helvetica",
         textColor=colors.HexColor("#A8BCCC"), alignment=TA_RIGHT, leading=15,
+        rightIndent=30,
     )
     info_style = ParagraphStyle(
         "hdr_info", fontSize=8.5, fontName="Helvetica",

@@ -375,14 +375,22 @@ def endurance_lsi_over_time(
 
 # ─── RTR radar chart ──────────────────────────────────────────────────────────
 
+_RADAR_POWER = 1.5   # >1 compresses mid-range scores; raise to make chart stricter
+
+
+def _radar_t(v: float) -> float:
+    """Nonlinear transform: score → plot radius. Power >1 makes chart harder to fill."""
+    return (max(0.0, min(v, 100.0)) / 100.0) ** _RADAR_POWER * 100.0
+
+
 def rtr_radar(
     domain_scores: dict,    # {domain_name: score_0_to_100}
     title: str = "Return to Sport Profile",
     figsize: tuple = (5, 5),
 ) -> plt.Figure:
     """Spider chart summarising performance across domains (0–100)."""
-    cats   = list(domain_scores.keys())
-    vals   = [min(float(domain_scores[k]), 100.0) for k in cats]   # cap at 100
+    cats = list(domain_scores.keys())
+    vals = [min(float(domain_scores[k]), 100.0) for k in cats]   # cap at 100
     n = len(cats)
 
     if n < 3:
@@ -391,17 +399,21 @@ def rtr_radar(
                 ha="center", va="center", color="#AAAAAA")
         return fig
 
-    angles = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist()
-    vals_c  = vals  + [vals[0]]
+    angles   = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist()
     angles_c = angles + [angles[0]]
+
+    # Apply nonlinear transform so mid-range scores look appropriately sparse
+    vals_t   = [_radar_t(v) for v in vals]
+    vals_c   = vals_t + [vals_t[0]]
 
     fig, ax = plt.subplots(figsize=figsize,
                            subplot_kw={"polar": True}, facecolor="white")
     ax.set_facecolor("#FAFAFA")
 
-    # Threshold rings
+    # Threshold rings — drawn at their transformed positions, labelled with true values
     for thresh, color in [(LSI_GREEN, COLORS["green"]), (LSI_YELLOW, COLORS["yellow"])]:
-        ring = [thresh] * (n + 1)
+        t_pos = _radar_t(thresh)
+        ring  = [t_pos] * (n + 1)
         ax.plot(angles_c, ring, color=color, linewidth=0.8, linestyle="--", alpha=0.5)
         ax.fill(angles_c, ring, color=color, alpha=0.04)
 
@@ -413,8 +425,12 @@ def rtr_radar(
     ax.set_xticks(angles)
     ax.set_xticklabels(cats, size=8, color=COLORS["text"])
     ax.set_ylim(0, 100)
-    ax.set_yticks([25, 50, 75, 90])
-    ax.set_yticklabels(["25", "50", "75", "90"], size=6, color="#AAAAAA")
+
+    # Ytick positions in transformed space, but labelled with true score values
+    real_ticks = [25, 50, 75, 90]
+    ax.set_yticks([_radar_t(t) for t in real_ticks])
+    ax.set_yticklabels([str(t) for t in real_ticks], size=6, color="#AAAAAA")
+
     ax.spines["polar"].set_visible(False)
     ax.set_title(title, size=11, fontweight="bold", color=COLORS["text"], pad=20)
 
