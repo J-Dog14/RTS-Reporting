@@ -3,7 +3,8 @@
     "allow": [
       "Bash(python main.py \"c:\\\\Users\\\\Joey\\\\PycharmProjects\\\\RTS Reporting\\\\data\")",
       "Bash(PYTHONUTF8=1 python main.py \"c:\\\\Users\\\\Joey\\\\PycharmProjects\\\\RTS Reporting\\\\data\")",
-      "Bash(python -c ':*)"
+      "Bash(python -c ':*)",
+      "Bash(python -c ' *)"
     ]
   }
 }

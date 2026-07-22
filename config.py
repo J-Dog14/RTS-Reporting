@@ -55,8 +55,8 @@ KINEMATIC_RATE = 200
 #    "R" = right side, "L" = left side.
 # ─────────────────────────────────────────────────────────────────────────────
 PLATE_SIDE = {
-    "FP1": "R",   # FP1 is the RIGHT force plate
-    "FP2": "L",   # FP2 is the LEFT force plate
+    "FP1": "L",   # FP1 is the LEFT force plate
+    "FP2": "R",   # FP2 is the RIGHT force plate
     "FP3": None,  # FP3 is side-agnostic (single-leg — side set by test)
 }
 
