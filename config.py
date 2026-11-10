@@ -30,6 +30,8 @@ PATIENT_NAME   = ""               # Leave blank — name is read from session fi
 SURGICAL_SIDE  = ""               # "L", "R", or "" to prompt via popup each run
                                   # (V3D does not export this; set it here or leave
                                   #  blank to get a selection dialog every session)
+REPORT_PROFILE = ""               # Report type: "acl", "achilles", or "" to pick
+                                  # in a dialog each run. Options live in profiles/.
 SURGERY_DATE   = ""               # ISO "YYYY-MM-DD", or US "MM/YY", "MM/YYYY",
                                   # "MM/DD/YY", "MM/DD/YYYY", or "" to prompt each run.
                                   # Used for months-since-surgery (RTR time modifier).
@@ -207,9 +209,10 @@ LOADING_RATE_WINDOW_MS = 50
 # Proprioception: trim this many seconds from each end of balance trial
 PROP_TRIM_SECONDS = 2.0
 
-# Jump height unit scaling — set to 1.0 if V3D exports in cm,
-# or 100.0 if V3D exports in metres and you want cm in the report
-JUMP_HEIGHT_SCALE = 1.0   # adjust if JH_IN_L / JH_IN_R are in metres
+# Jump height unit scaling. V3D's JH_IN / JH_IN_L / JH_IN_R are INCHES
+# (they match the JT flight time), and the report labels jump height "(in)".
+# Leave at 1.0 unless the V3D pipeline changes units.
+JUMP_HEIGHT_SCALE = 1.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────

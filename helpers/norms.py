@@ -309,22 +309,24 @@ _TIME_CONTROL_POINTS = [
 ]
 
 
-def time_factor(months: float) -> float:
+def time_factor(months: float, points=None) -> float:
     """
-    Map months post-surgery to a 0.80–1.0 multiplier (see _TIME_CONTROL_POINTS).
+    Map months post-surgery to a 0.80–1.0 multiplier (see _TIME_CONTROL_POINTS,
+    or the profile's own `points` list of (months, factor)).
     The final RTR score = performance_score × time_factor.
 
     Unknown months (None) → 1.0. Poor performance late post-op still scores poorly.
     """
+    pts = points or _TIME_CONTROL_POINTS
     if months is None:
         return 1.0   # unknown — don't penalise; clinician must judge
-    if months <= 0:
-        return _TIME_CONTROL_POINTS[0][1]
-    if months >= 24:
-        return 1.0
-    for i in range(len(_TIME_CONTROL_POINTS) - 1):
-        m0, f0 = _TIME_CONTROL_POINTS[i]
-        m1, f1 = _TIME_CONTROL_POINTS[i + 1]
+    if months <= pts[0][0]:
+        return pts[0][1]
+    if months >= pts[-1][0]:
+        return pts[-1][1]
+    for i in range(len(pts) - 1):
+        m0, f0 = pts[i]
+        m1, f1 = pts[i + 1]
         if m0 <= months <= m1:
             t = (months - m0) / (m1 - m0)
             return round(f0 + t * (f1 - f0), 4)
@@ -400,12 +402,15 @@ _RED_PENALTY = [
 ]
 
 
-def compute_rtr_score(metric_values: dict) -> dict:
+def compute_rtr_score(metric_values: dict, profile=None) -> dict:
     """
     Compute a 0–100 RTR composite score with time-since-surgery modifier.
 
     metric_values : dict mapping RTR_WEIGHTS keys to raw float values.
                     Optionally include "_months_since_surgery" (float or None).
+    profile       : optional ReportProfile (profiles/). Supplies its own
+                    rtr_weights, extra_norms, time_points and time_note.
+                    None → the original ACL weights below.
 
     Returns: {
         'score'          : float  — final 0–100 score
@@ -427,11 +432,15 @@ def compute_rtr_score(metric_values: dict) -> dict:
     breakdown     = {}
     red_count     = 0
 
-    for label, (norm_key, weight) in RTR_WEIGHTS.items():
+    weights = (profile.rtr_weights if profile is not None and profile.rtr_weights
+               else RTR_WEIGHTS)
+    norms   = {**NORMS, **(profile.extra_norms if profile is not None else {})}
+
+    for label, (norm_key, weight) in weights.items():
         value = metric_values.get(label)
         if value is None or (isinstance(value, float) and value != value):
             continue
-        norm = NORMS.get(norm_key)
+        norm = norms.get(norm_key)
         if norm is None:
             continue
 
@@ -457,7 +466,8 @@ def compute_rtr_score(metric_values: dict) -> dict:
     penalised      = perf_score * red_factor
 
     # ── Step 3: Time-since-surgery modifier ───────────────────────────────────
-    tf             = time_factor(months_post_op)
+    tf             = time_factor(months_post_op,
+                                 profile.time_points if profile is not None else None)
     final_score    = penalised * tf
 
     # ── Step 4: Grade (with hard time cap below 9 months) ────────────────────
@@ -482,14 +492,16 @@ def compute_rtr_score(metric_values: dict) -> dict:
 
     # ── Time note for the report ──────────────────────────────────────────────
     time_note = None
-    if months_post_op is not None:
+    if profile is not None and profile.time_note is not None:
+        time_note = profile.time_note(months_post_op)
+    elif months_post_op is not None:
         if months_post_op < 6:
             time_note = (f"{months_post_op:.1f} months post-op — physiologically too early. "
                          f"Evidence requires ≥ 9 months minimum (Kyritsis 2016 BJSM).")
         elif months_post_op < 9:
             time_note = (f"{months_post_op:.1f} months post-op — below the 9-month evidence "
                          f"threshold. Risk is 4–7× higher than athletes who wait ≥ 9 months "
-                         f"(Kyritsis 2016 BJSM). Grade capped at Caution.")
+                         f"(Kyritsis 2016 BJSM).")
         elif months_post_op < 12:
             time_note = (f"{months_post_op:.1f} months post-op — within evidence window. "
                          f"RTS possible if all performance criteria met.")

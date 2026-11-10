@@ -268,6 +268,7 @@ def cop_bilateral_ap_trace(
     rate: float = 1000.0,
     title: str  = "COP Anterior-Posterior Displacement",
     figsize: tuple = (7.5, 2.0),
+    first_contact_only: bool = True,
 ) -> plt.Figure:
     """
     Overlay AP COP displacement for surgical and non-surgical limbs.
@@ -280,7 +281,7 @@ def cop_bilateral_ap_trace(
       • Whether one limb's COP is biased anterior or posterior vs its midpoint
       • Asymmetric excursion = restricted / guarded loading strategy
     """
-    GRF_THRESH = 30.0   # N — below this = no meaningful plate contact
+    from helpers.grf import cop_contact_mask
 
     fig, ax = plt.subplots(figsize=figsize, facecolor="white")
 
@@ -290,10 +291,13 @@ def cop_bilateral_ap_trace(
             return None, None
         t = np.arange(len(cop_y)) / rate
         y = cop_y.astype(float).copy()
-        # build contact mask
-        if fz is not None and len(fz) == len(y):
-            contact = fz >= GRF_THRESH
-        else:
+        # build contact mask — loaded frames of the first contact only, edges
+        # trimmed (COP is unstable when Fz is small at touchdown / take-off)
+        contact = None
+        if fz is not None and len(fz) >= len(y):
+            contact = cop_contact_mask(fz, rate, n=len(y),
+                                       first_only=first_contact_only)
+        if contact is None or not contact.any():
             contact = np.abs(y) > 1e-9
         # zero-centre using the mean of contact frames
         contact_mean = np.nanmean(y[contact]) if contact.any() else np.nanmean(y)

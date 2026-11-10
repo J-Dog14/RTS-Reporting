@@ -28,6 +28,16 @@ Bilateral comparison (per condition)
 lsi_cop_velocity  : LSI of mean COP velocity — (non_surg / surg) × 100
 lsi_ellipse_area  : LSI of ellipse area
 
+Signal conditioning
+-------------------
+COP is low-pass filtered (grf.COP_LOWPASS_HZ, default 10 Hz) before any metric
+is computed. Unfiltered 1000 Hz COP is dominated by plate noise: frame-to-frame
+jitter of ~0.3 mm × 1000 Hz alone adds ~300 mm/s of "velocity". If the plate's
+Fz is supplied, frames where Fz drops below 80 % of the trial median (other foot
+touching down off-plate, stepping on/off) are excluded too. A limb is marked
+`suspect` when the COP range exceeds SUSPECT_RANGE_MM — usually a foot shift or
+touchdown rather than sway.
+
 Note: higher COP velocity / area = worse balance (lower_better metric).
 LSI = (non_surgical / surgical) × 100 so that 100% means equal stability.
 Surgical < 100% means the surgical side has WORSE balance.
@@ -37,7 +47,9 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from helpers.grf import analyse_cop, COPMetrics
+from helpers.grf import analyse_cop, COPMetrics, lowpass
+
+SUSPECT_RANGE_MM = 150.0   # a single-leg stance COP range beyond this is not sway
 
 
 # ─── Result dataclasses ───────────────────────────────────────────────────────
@@ -54,10 +66,14 @@ class PropLimbResult:
     ellipse_area_mm2:     float = np.nan
     rms_displacement_mm:  float = np.nan
 
-    # COP arrays (trimmed, for figures)
+    # COP arrays (trimmed + filtered, for figures)
     cop_x:  object = field(default=None, repr=False)   # ML (mm)
     cop_y:  object = field(default=None, repr=False)   # AP (mm)
     rate:   float  = np.nan
+
+    # Data-quality
+    suspect:         bool  = False   # COP range too large to be sway
+    frames_excluded: int   = 0       # frames dropped for low Fz
 
 
 @dataclass
@@ -123,6 +139,7 @@ def analyse(
     rate_f:           float,
     surg_side:        str,
     trim_seconds:     float = 2.0,
+    fz:               dict  = None,
 ) -> ProprioceptionResult:
     """
     Analyse COP data for both balance conditions independently.
@@ -136,8 +153,10 @@ def analyse(
     rate_f        : COFP sample rate (Hz)
     surg_side     : 'L' or 'R'
     trim_seconds  : seconds removed from each end of every trial
+    fz            : optional {"surg_std","ns_std","surg_airex","ns_airex"} → Fz arrays
     """
     r = ProprioceptionResult()
+    fz = fz or {}
 
     # ── Standard condition ────────────────────────────────────────────────────
     std_has_data = any(a is not None for a in
@@ -148,6 +167,7 @@ def analyse(
             cop_x_surg=cop_x_surg_std, cop_y_surg=cop_y_surg_std,
             cop_x_ns=cop_x_ns_std,     cop_y_ns=cop_y_ns_std,
             rate_f=rate_f, trim_seconds=trim_seconds,
+            fz_surg=fz.get("surg_std"), fz_ns=fz.get("ns_std"),
         )
 
     # ── Airex condition ───────────────────────────────────────────────────────
@@ -160,6 +180,7 @@ def analyse(
             cop_x_surg=cop_x_surg_airex, cop_y_surg=cop_y_surg_airex,
             cop_x_ns=cop_x_ns_airex,     cop_y_ns=cop_y_ns_airex,
             rate_f=rate_f, trim_seconds=trim_seconds,
+            fz_surg=fz.get("surg_airex"), fz_ns=fz.get("ns_airex"),
         )
 
     return r
@@ -171,14 +192,15 @@ def _analyse_condition(condition: str,
                        cop_x_surg, cop_y_surg,
                        cop_x_ns,   cop_y_ns,
                        rate_f: float,
-                       trim_seconds: float) -> PropConditionResult:
+                       trim_seconds: float,
+                       fz_surg=None, fz_ns=None) -> PropConditionResult:
     """Analyse both limbs for a single balance condition."""
     c = PropConditionResult(condition=condition)
 
     c.surgical     = _analyse_limb(cop_x_surg, cop_y_surg, rate_f,
-                                   trim_seconds, "Surgical")
+                                   trim_seconds, "Surgical", fz_surg)
     c.non_surgical = _analyse_limb(cop_x_ns,   cop_y_ns,   rate_f,
-                                   trim_seconds, "Non-Surgical")
+                                   trim_seconds, "Non-Surgical", fz_ns)
 
     c.lsi_cop_velocity = _prop_lsi(c.surgical.mean_velocity_mm_s,
                                     c.non_surgical.mean_velocity_mm_s)
@@ -191,15 +213,39 @@ def _analyse_limb(cop_x: Optional[np.ndarray],
                   cop_y: Optional[np.ndarray],
                   rate: float,
                   trim_s: float,
-                  label: str) -> PropLimbResult:
-    """Trim and compute COP metrics for one limb / one trial."""
+                  label: str,
+                  fz: Optional[np.ndarray] = None) -> PropLimbResult:
+    """Trim, filter and compute COP metrics for one limb / one trial."""
     result = PropLimbResult(side=label, rate=rate)
 
     if cop_x is None or cop_y is None or len(cop_x) < 20:
         return result
 
-    x = _trim(cop_x, rate, trim_s)
-    y = _trim(cop_y, rate, trim_s)
+    n = min(len(cop_x), len(cop_y))
+    # Low-pass the full trial first (avoids filter edge effects in the window)
+    x = _trim(lowpass(cop_x[:n], rate), rate, trim_s)
+    y = _trim(lowpass(cop_y[:n], rate), rate, trim_s)
+
+    # Drop frames where the stance plate is not carrying the athlete
+    if fz is not None and len(fz) >= n:
+        f = _trim(np.nan_to_num(np.asarray(fz[:n], dtype=float)), rate, trim_s)
+        med = float(np.median(f)) if len(f) else 0.0
+        if med > 0:
+            keep = f >= 0.8 * med
+            result.frames_excluded = int((~keep).sum())
+            # Keep the longest continuous loaded segment so velocity isn't
+            # computed across a gap
+            if result.frames_excluded:
+                best, cur_s, best_rng = 0, None, (0, 0)
+                for i, k in enumerate(np.append(keep, False)):
+                    if k and cur_s is None:
+                        cur_s = i
+                    elif not k and cur_s is not None:
+                        if i - cur_s > best:
+                            best, best_rng = i - cur_s, (cur_s, i)
+                        cur_s = None
+                x = x[best_rng[0]:best_rng[1]]
+                y = y[best_rng[0]:best_rng[1]]
 
     if len(x) < 20:
         return result
@@ -215,6 +261,7 @@ def _analyse_limb(cop_x: Optional[np.ndarray],
     result.range_ml_mm         = metrics.range_ml_mm
     result.ellipse_area_mm2    = metrics.ellipse_area_mm2
     result.rms_displacement_mm = metrics.rms_displacement_mm
+    result.suspect = bool(max(result.range_ap_mm, result.range_ml_mm) > SUSPECT_RANGE_MM)
 
     return result
 

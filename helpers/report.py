@@ -22,9 +22,10 @@ from reportlab.lib.units import inch
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_JUSTIFY, TA_RIGHT
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+    SimpleDocTemplate, Paragraph as _RLParagraph, Spacer, Table, TableStyle,
     HRFlowable, PageBreak, Image, KeepTogether,
 )
+import re as _re
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -33,6 +34,34 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import CLINIC_NAME, CLINIC_SUBTITLE, COLORS, PAGE_SIZE, LSI_GREEN, LSI_YELLOW
 from helpers.norms import NORMS, compute_rtr_score, time_factor as _time_factor
 from helpers import figures as fig_lib
+
+
+# ─── Glyph-safe Paragraph ────────────────────────────────────────────────────
+# Helvetica (PDF base-14) has no Δ, ², ✓, ⚠, ▲ … glyphs, so they rendered as
+# blanks or boxes ("LSI / ", "(mm )", "▌ STRENGTHS"). Every Paragraph below
+# wraps just those characters in DejaVu Sans, which ships with matplotlib, so
+# the rest of the layout keeps Helvetica's metrics.
+def _register_glyph_font():
+    try:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        path = os.path.join(matplotlib.get_data_path(), "fonts", "ttf", "DejaVuSans.ttf")
+        pdfmetrics.registerFont(TTFont("DejaVuSans", path))
+        return "DejaVuSans"
+    except Exception:
+        return None
+
+
+_GLYPH_FONT = _register_glyph_font()
+_GLYPH_RE   = _re.compile("[\u0394\u00b2\u2713\u26a0\u2717\u25b2\u25bc\u25cf\u25b6]")
+
+
+class Paragraph(_RLParagraph):
+    def __init__(self, text, style=None, *args, **kwargs):
+        if _GLYPH_FONT and isinstance(text, str):
+            text = _GLYPH_RE.sub(
+                lambda m: f'<font name="{_GLYPH_FONT}">{m.group(0)}</font>', text)
+        super().__init__(text, style, *args, **kwargs)
 
 
 # ─── Utility helpers ─────────────────────────────────────────────────────────
@@ -143,11 +172,11 @@ def _delta_phrase(sv, nv, metric, unit="°", warn=None, err=None) -> str:
         base  = (f"Surgical {metric}: {sv_f:.1f}{unit} vs non-surgical {nv_f:.1f}{unit} "
                  f"(Δ {sign}{delta:.1f}{unit})")
         if err and abs(delta) > err:
-            return f"{base} — exceeds {err:.0f}° clinical threshold; targeted intervention recommended."
+            return f"{base} — side-to-side difference exceeds {err:.0f}°; targeted intervention recommended."
         elif warn and abs(delta) > warn:
-            return f"{base} — mild asymmetry; monitor closely."
+            return f"{base} — mild side-to-side asymmetry; monitor closely."
         else:
-            return f"{base} — within acceptable range."
+            return f"{base} — side-to-side difference within acceptable range."
     except (TypeError, ValueError):
         return ""
 
@@ -285,7 +314,8 @@ def _surgery_date_display(surgery_date: str) -> str:
 def _header(s: dict, name: str, dob: str, side: str,
             date: str, clinician: str = "",
             surgery_date: str = "", months_post_op: float = None,
-            triple_hop: dict = None) -> Table:
+            triple_hop: dict = None, subtitle: str = None,
+            manual_tests: list = None) -> Table:
     """
     Header layout — two-column inner block:
       LEFT  (65%): CLINIC_NAME (bold), then patient / date / surgery / triple hop info lines
@@ -345,6 +375,18 @@ def _header(s: dict, name: str, dob: str, side: str,
         if th_lsi is not None:
             hop_parts.append(f"LSI {th_lsi:.1f}%")
         side_parts.append(f"<b>Triple Hop:</b> {' / '.join(hop_parts)}")
+    for mt in (manual_tests or []):
+        parts = []
+        if mt.get("surg") is not None:
+            parts.append(f"Surg {mt['surg']:g}")
+        if mt.get("ns") is not None:
+            parts.append(f"NS {mt['ns']:g}")
+        if mt.get("lsi") is not None:
+            parts.append(f"LSI {mt['lsi']:.1f}%")
+        if parts:
+            unit = f" {mt['unit']}" if mt.get("unit") else ""
+            side_parts.append(f"<b>{mt['label']}{' (' + mt['unit'] + ')' if unit else ''}:</b> "
+                              + " / ".join(parts))
     line3 = Paragraph("  &nbsp;•&nbsp;  ".join(side_parts), info_style)
 
     # ── Left cell ─────────────────────────────────────────────────────────────
@@ -361,7 +403,7 @@ def _header(s: dict, name: str, dob: str, side: str,
                            fontName="Helvetica")))
 
     # ── Right cell: subtitle right-aligned, vertically centred ────────────────
-    right_content = [Paragraph(CLINIC_SUBTITLE, subtitle_style)]
+    right_content = [Paragraph(subtitle or CLINIC_SUBTITLE, subtitle_style)]
 
     LEFT_COL  = W_FULL * 0.62
     RIGHT_COL = W_FULL * 0.38
@@ -418,6 +460,18 @@ def _metrics_table(rows: list, s: dict) -> Table:
     ]]
     _dash_style = ParagraphStyle("greydash", fontSize=8.5, alignment=TA_CENTER,
                                   textColor=colors.HexColor("#CCCCCC"))
+
+    def _missing(v):
+        if v is None:
+            return True
+        try:
+            return float(v) != float(v)
+        except (TypeError, ValueError):
+            return False
+
+    # Drop rows where neither limb has a value (e.g. hip flexion / IR when the
+    # V3D export doesn't include that component) instead of printing "— — —".
+    rows = [r for r in rows if not (_missing(r[1]) and _missing(r[2]))]
 
     for row in rows:
         name, sv, nv, lv = row[:4]
@@ -544,11 +598,13 @@ _INFLUENCE_NAMES = {
 def _score_influence_box(rtr_result: dict, s: dict,
                          width: float, tf: float,
                          perf_score: float,
-                         months_post_op: float = None) -> list:
+                         months_post_op: float = None,
+                         names: dict = None) -> list:
     """
     Stacked Strengths → Detractors panel (single column, full width).
     Returns a list of flowables sized to `width` inches.
     """
+    names      = names or _INFLUENCE_NAMES
     breakdown  = rtr_result.get("breakdown", {})
     red_factor = rtr_result.get("red_factor", 1.0)
     score      = rtr_result.get("score", 0)
@@ -590,7 +646,7 @@ def _score_influence_box(rtr_result: dict, s: dict,
     rows.append([Paragraph("▲  STRENGTHS", s_hd_str)])
     if strengths:
         for k, v in strengths:
-            name  = _INFLUENCE_NAMES.get(k, k)
+            name  = names.get(k, k)
             score_val = v.get("score", 0)
             rows.append([Paragraph(f"  {name}  ({score_val:.0f}/100)", s_item_str)])
     else:
@@ -600,7 +656,7 @@ def _score_influence_box(rtr_result: dict, s: dict,
     rows.append([Paragraph("▼  DETRACTORS", s_hd_det)])
     if detractors:
         for k, v in detractors:
-            name      = _INFLUENCE_NAMES.get(k, k)
+            name      = names.get(k, k)
             score_val = v.get("score", 0)
             rows.append([Paragraph(f"  {name}  ({score_val:.0f}/100)", s_item_det)])
     else:
@@ -611,7 +667,7 @@ def _score_influence_box(rtr_result: dict, s: dict,
     if perf_score != score:
         eqn_parts.append(f"Performance {perf_score:.0f}/100")
         if red_factor < 1.0:
-            eqn_parts.append(f"×{red_factor:.2f} red-flag penalty")
+            eqn_parts.append(f"×{red_factor:.2f} red-flag penalty ({rtr_result.get('red_count', 0)} scored)")
         if tf < 0.99:
             eqn_parts.append(f"×{tf:.2f} time modifier")
         eqn_parts.append(f"= {score:.0f}/100")
@@ -644,9 +700,13 @@ def _score_influence_box(rtr_result: dict, s: dict,
 
 # ─── Executive summary (one page) ─────────────────────────────────────────────
 
+MAX_FLAGS = 8   # clinical-flag lines shown on the summary page
+
 def _exec_summary(s: dict, patient_data: dict, lsi_summary: dict,
                   domain_scores: dict, clinical_notes: list,
-                  rtr_result: dict) -> list:
+                  rtr_result: dict, profile=None,
+                  summary_notes: list = None,
+                  influence_names: dict = None) -> list:
     story = []
 
     months_post_op = patient_data.get("months_since_surgery")
@@ -663,6 +723,8 @@ def _exec_summary(s: dict, patient_data: dict, lsi_summary: dict,
         surgery_date=surgery_date,
         months_post_op=months_post_op,
         triple_hop=patient_data.get("triple_hop"),
+        subtitle=profile.report_subtitle if profile is not None else None,
+        manual_tests=list((patient_data.get("manual_tests") or {}).values()),
     ))
     story.append(Spacer(1, 5))
 
@@ -681,9 +743,9 @@ def _exec_summary(s: dict, patient_data: dict, lsi_summary: dict,
 
     sub_parts = []
     if red_count > 0:
-        sub_parts.append(f"{red_count} red flag{'s' if red_count > 1 else ''}")
+        sub_parts.append(f"{red_count} scored red flag{'s' if red_count > 1 else ''}")
     if months_post_op is not None and tf < 0.99:
-        sub_parts.append(f"{months_post_op:.0f} mo post-op")
+        sub_parts.append(f"{months_post_op:.1f} mo post-op")
     sub_line = " · ".join(sub_parts) if sub_parts else ""
 
     score_cell = Table(
@@ -742,7 +804,8 @@ def _exec_summary(s: dict, patient_data: dict, lsi_summary: dict,
     influence_items = _score_influence_box(
         rtr_result, s, width=LEFT_W,
         tf=tf, perf_score=perf_score,
-        months_post_op=months_post_op)
+        months_post_op=months_post_op,
+        names=influence_names)
 
     # Assemble left column rows
     left_rows = [[badge], [Spacer(1, 6)], [radar_img], [Spacer(1, 4)]]
@@ -798,25 +861,36 @@ def _exec_summary(s: dict, patient_data: dict, lsi_summary: dict,
     CLINICAL_EST = 1.2 * inch
     FOOTER_H     = 0.35 * inch
     HEADER_EST   = 0.95 * inch
+    extra_lines = max(0, min(len(clinical_notes), MAX_FLAGS + 1) - 6) + len(summary_notes or [])
     FILL_H = (H_PAGE
               - HEADER_EST
               - 5
               - BAR_H * inch
               - CLINICAL_EST
+              - extra_lines * 12
               - FOOTER_H
               - 0.5 * inch)
     if FILL_H > 0:
         story.append(Spacer(1, FILL_H))
 
     # ── Clinical flags ────────────────────────────────────────────────────────
+    # Every metric with LSI < 75% (or a kinematic Δ beyond threshold), worst
+    # first. The badge count is different: it counts SCORED metrics in the
+    # red zone of their own norm — the score equation shows that number.
     story += _sec("CLINICAL FLAGS", s)
     if clinical_notes:
-        for note in clinical_notes[:6]:
+        for note in clinical_notes[:MAX_FLAGS]:
             story.append(Paragraph(f"• {note}", s["body"]))
+        if len(clinical_notes) > MAX_FLAGS:
+            story.append(Paragraph(
+                f"• +{len(clinical_notes) - MAX_FLAGS} more — see individual test pages.",
+                s["small"]))
     else:
         story.append(Paragraph(
             "No significant asymmetries flagged. Review individual test pages.",
             s["body"]))
+    for note in (summary_notes or []):
+        story.append(Paragraph(f"<i>{note}</i>", s["small"]))
     story.append(Spacer(1, 3))
 
     # Footer
@@ -835,9 +909,20 @@ def _exec_summary(s: dict, patient_data: dict, lsi_summary: dict,
 
 def build_report(output_path: str, patient_data: dict,
                  test_results: dict, all_signals: dict = None,
-                 rtr_metrics: dict = None) -> str:
+                 rtr_metrics: dict = None, profile=None) -> str:
+    """
+    profile : a profiles.ReportProfile (ACL / Achilles / ...). Supplies the
+              clinical wording, captions, targets and scoring weights.
+              None → the default (ACL) profile.
+    """
     if all_signals is None:
         all_signals = {}
+    if profile is None:
+        from profiles import get_profile
+        profile = get_profile()
+    P = profile
+    summary_notes = []
+    _ankle = {"seen": False}   # did ANY ankle angle / moment signal arrive?
 
     s   = _styles()
     doc = SimpleDocTemplate(
@@ -865,7 +950,7 @@ def build_report(output_path: str, patient_data: dict,
             clinical_notes.append(
                 f"{label}: LSI {lv:.1f}% — significant asymmetry")
 
-    def _reg_delta(label, sv, nv, warn_deg: float, err_deg: float):
+    def _reg_delta(label, sv, nv, warn_deg: float, err_deg: float, flag: bool = True):
         """
         Register a metric compared by absolute side-to-side delta (degrees).
         Stores None as LSI so the table renders in delta mode.
@@ -873,6 +958,8 @@ def build_report(output_path: str, patient_data: dict,
         Does NOT contribute to domain_scores — LSI-based radar scoring only.
         """
         lsi_summary[label] = (sv, nv, None)
+        if not flag:
+            return
         try:
             delta = float(sv) - float(nv)   # signed: + means surgical > non-surg
             if abs(delta) > err_deg:
@@ -883,26 +970,68 @@ def build_report(output_path: str, patient_data: dict,
             pass
 
     # ── helper: AP COP excursion (fore-aft range) during contact phase ──────────
-    def _ap_excursion(cop_y, fz, thresh=30.0):
+    def _ap_excursion(cop_y, fz, first_only=True):
         """
-        Returns fore-aft COP range (mm) during contact frames.
+        Fore-aft COP range (mm) during the loaded part of the contact.
         V3D COP is in global lab coords — raw absolute values are meaningless.
-        Excursion (max-min) is coordinate-system independent and clinically useful:
-        smaller excursion on surgical side = restricted / guarded loading.
+        Excursion (max-min) is coordinate-system independent.
+
+        Only frames with Fz ≥ 100 N, edges trimmed by 20 ms, and (for jump
+        tests) only the FIRST contact are used — COP = M/Fz is garbage near
+        touchdown / take-off and during flight, which previously produced
+        600+ mm "excursions".
         """
-        import numpy as _np
-        if cop_y is None:
+        from helpers.grf import cop_contact_mask
+        if cop_y is None or fz is None or len(fz) < len(cop_y):
             return None
-        y = cop_y.astype(float).copy()
-        if fz is not None and len(fz) == len(y):
-            contact = fz >= thresh
-        else:
-            contact = _np.abs(y) > 1e-9
-        yc = y[contact]
+        y = cop_y.astype(float)
+        mask = cop_contact_mask(fz, rate_grf, n=len(y), first_only=first_only)
+        if mask is None or not mask.any():
+            return None
+        yc = y[mask]
+        yc = yc[~np.isnan(yc)]
         if len(yc) < 5:
             return None
-        ex = float(_np.nanmax(yc) - _np.nanmin(yc))
-        return round(ex, 1) if not _np.isnan(ex) else None
+        return round(float(yc.max() - yc.min()), 1)
+
+    def _cop_phrase(ap_s, ap_n):
+        if ap_s is None or ap_n is None:
+            return ""
+        base = (f"AP COP excursion: surgical {ap_s:.0f} mm vs non-surgical {ap_n:.0f} mm — ")
+        if abs(ap_s - ap_n) <= max(5.0, 0.10 * max(ap_s, ap_n)):
+            return base + "symmetric fore-aft weight shift."
+        if ap_s < ap_n:
+            return base + "less fore-aft travel on the surgical side — guarded or restricted loading."
+        return base + "more fore-aft travel on the surgical side — less controlled foot loading."
+
+    def _ankle_rows(sigs, label_prefix, rtr_key=None, flag=True):
+        """Ankle dorsiflexion Δ row + ankle moment LSI row, when exported."""
+        out = []
+        ds, dn = sigs.get("ankle_flex_surg"), sigs.get("ankle_flex_ns")
+        if ds is not None and len(ds) > 0:
+            _ankle["seen"] = True
+            ank_s = float(np.nanmax(ds))
+            ank_n = float(np.nanmax(dn)) if dn is not None and len(dn) > 0 else None
+            _reg_delta(f"{label_prefix} Ankle Dorsiflexion", ank_s, ank_n,
+                       warn_deg=3.0, err_deg=6.0, flag=flag)
+            out.append(_delta_row("Peak Ankle Dorsiflexion (°)", ank_s, ank_n, warn_deg=3.0, err_deg=6.0))
+        am_s, am_n = sigs.get("ankle_moment_surg"), sigs.get("ankle_moment_ns")
+        if not (_isnan(am_s) and _isnan(am_n)):
+            _ankle["seen"] = True
+            am_lsi = (round(am_s / am_n * 100, 1)
+                      if (not _isnan(am_s) and not _isnan(am_n) and am_n > 0) else None)
+            _reg(f"{label_prefix} Ankle Moment", am_s, am_n, am_lsi,
+                 "Calf" if P.ankle_focus else "Force", rtr_key)
+            out.append(("Peak Ankle Moment (Nm)", _fmt(am_s, 1), _fmt(am_n, 1), am_lsi))
+        return out
+
+    def _rate_gap(peak_lsi, rate_lsi):
+        """True when force magnitude is near-symmetric but rate is clearly not."""
+        try:
+            return (float(peak_lsi) >= 85 and float(rate_lsi) < 80
+                    and float(peak_lsi) - float(rate_lsi) >= 10)
+        except (TypeError, ValueError):
+            return False
 
     # ── helper: build a compact one-page test section ─────────────────────────
     def _test_page(title: str, rows: list, interp_lines: list,
@@ -924,6 +1053,15 @@ def build_report(output_path: str, patient_data: dict,
           optional movement description box at bottom
         Always ends with PageBreak.
         """
+        # Profiles that don't score knee frontal-plane metrics (e.g. Achilles)
+        # show valgus / tibial rotation as context, not as calls to action.
+        if not P.flag_knee_frontal:
+            def _ctx(txt):
+                for tail in ("; targeted intervention recommended.", "; monitor closely."):
+                    txt = txt.replace(tail, " (context only — not scored for this report type).")
+                return txt
+            sum_l2, sum_r2 = _ctx(sum_l2), _ctx(sum_r2)
+
         pg = []
         pg += _sec(title, s)
         pg.append(_metrics_table(rows, s))
@@ -1034,7 +1172,7 @@ def build_report(output_path: str, patient_data: dict,
                 ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
                 ("LINEABOVE",     (0, 0), (-1, 0),  1.0, colors.HexColor(COLORS["accent"])),
             ]))
-            pg.append(desc_tbl)
+            pg.append(KeepTogether([desc_tbl]))
 
         pg.append(PageBreak())
         return pg
@@ -1057,15 +1195,17 @@ def build_report(output_path: str, patient_data: dict,
                 ("Impulse (N·s)",      o.surgical.impulse_Ns,    o.non_surgical.impulse_Ns,    o.lsi_impulse),
                 ("RFD 100ms (N/s)",    o.surgical.rfd_Ns,        o.non_surgical.rfd_Ns,        o.lsi_rfd),
             ]
-        _reg("DJ Load Rate", dj.loading_rate_surg_ns, dj.loading_rate_ns_ns, dj.loading_rate_lsi, "Force")
+        _reg("DJ Load Rate", dj.loading_rate_surg_ns, dj.loading_rate_ns_ns, dj.loading_rate_lsi, "Force", "dj_load_rate_lsi")
         _reg("DJ Land Sym",  None, None, dj.landing_lsi_200ms, "Force", "landing_lsi")
+        _reg("DJ Impact",    dj.impact_transient_surg, dj.impact_transient_ns, dj.impact_transient_lsi, "Force", "dj_impact_lsi")
         rows += [
             ("Loading Rate 50ms (N/s)", dj.loading_rate_surg_ns,  dj.loading_rate_ns_ns,  dj.loading_rate_lsi),
             ("Landing Sym 200ms (%)",   "—",                      "—",                    dj.landing_lsi_200ms),
             ("Impact Transient (N)",    dj.impact_transient_surg, dj.impact_transient_ns, dj.impact_transient_lsi),
             ("Time-to-Peak (ms)",       dj.time_to_peak_surg_ms,  dj.time_to_peak_ns_ms,  None),
-            ("RSI",                     _fmt(dj.rsi, 3),          "—",                    None),
+            ("Jump Height (in)",        _fmt(dj.jump_height_cm, 1), "—",                  None),
             ("Contact Time (s)",        _fmt(dj.contact_time_s, 3), "—",                  None),
+            ("RSI (m/s)",               _fmt(dj.rsi, 2),          "—",                    None),
         ]
         if dj.rsi == dj.rsi:
             _rtr["drop_jump_rsi"] = dj.rsi
@@ -1074,7 +1214,7 @@ def build_report(output_path: str, patient_data: dict,
         if dj.kinematics:
             k = dj.kinematics
             _reg("DJ Knee Flexion", k.surg_knee.peak_flexion_deg, k.non_surg_knee.peak_flexion_deg, k.lsi_peak_flexion, "Kinematics")
-            _reg_delta("DJ Knee Valgus", k.surg_knee.peak_valgus_deg, k.non_surg_knee.peak_valgus_deg, warn_deg=3.0, err_deg=6.0)
+            _reg_delta("DJ Knee Valgus", k.surg_knee.peak_valgus_deg, k.non_surg_knee.peak_valgus_deg, warn_deg=3.0, err_deg=6.0, flag=P.flag_knee_frontal)
             rows += [
                 ("Peak Knee Flexion (°)",    k.surg_knee.peak_flexion_deg,   k.non_surg_knee.peak_flexion_deg,   k.lsi_peak_flexion),
                 _delta_row("Peak Knee Valgus (°)",   k.surg_knee.peak_valgus_deg,    k.non_surg_knee.peak_valgus_deg,    warn_deg=3.0, err_deg=6.0),
@@ -1088,11 +1228,7 @@ def build_report(output_path: str, patient_data: dict,
                     _delta_row("Peak Hip Adduction (°)", sh.peak_adduction_deg, nh.peak_adduction_deg, warn_deg=3.0, err_deg=6.0),
                     _delta_row("Peak Hip IR (°)",        sh.peak_ir_deg,        nh.peak_ir_deg,        warn_deg=5.0, err_deg=8.0),
                 ]
-        if sigs.get("ankle_flex_surg") is not None:
-            ank_s = float(np.nanmax(sigs["ankle_flex_surg"])) if len(sigs["ankle_flex_surg"]) > 0 else None
-            ank_n = float(np.nanmax(sigs["ankle_flex_ns"])) if sigs.get("ankle_flex_ns") is not None and len(sigs["ankle_flex_ns"]) > 0 else None
-            _reg_delta("DJ Ankle Dorsiflexion", ank_s, ank_n, warn_deg=3.0, err_deg=6.0)
-            rows += [_delta_row("Peak Ankle Dorsiflexion (°)", ank_s, ank_n, warn_deg=3.0, err_deg=6.0)]
+        rows += _ankle_rows(sigs, "DJ")
 
         # ── Kinetics ──────────────────────────────────────────────────────────
         km_s = sigs.get("knee_moment_surg")
@@ -1110,19 +1246,28 @@ def build_report(output_path: str, patient_data: dict,
 
         # ── Interpretation ────────────────────────────────────────────────────
         rsi = dj.rsi if dj.rsi == dj.rsi else None
+        ct  = dj.contact_time_s if dj.contact_time_s == dj.contact_time_s else None
         ll  = dj.landing_lsi_200ms if dj.landing_lsi_200ms == dj.landing_lsi_200ms else None
         interp = []
         if rsi:
+            ct_txt = f" with {ct:.2f} s contact" if ct else ""
             interp.append(
-                f"<b>RSI {rsi:.2f}</b> ({'✓ meets' if rsi >= 1.3 else '⚠ below'} RTS target ≥ 1.30). "
-                + ("Reactive capacity is adequate." if rsi >= 1.3
-                   else "Stiff-landing pattern likely — progressive plyometric loading indicated."))
+                f"<b>RSI {rsi:.2f} m/s</b>{ct_txt} ({'✓ meets' if rsi >= 1.3 else '⚠ below'} RTS target ≥ 1.30). "
+                + ("Reactive capacity is adequate." if rsi >= 1.3 else P.t("drop_jump", "rsi_low")))
+        if ct and ct > 0.35 and P.ankle_focus:
+            interp.append(f"<b>Contact time {ct:.2f} s</b> — not a reactive (fast stretch-shortening) contact; "
+                          f"target < 0.25 s.")
+        if P.ankle_focus and dj.grf_overall:
+            _pk = dj.grf_overall.lsi_peak
+            _rt = min([v for v in (dj.grf_overall.lsi_rfd, dj.loading_rate_lsi) if v == v] or [np.nan])
+            if _rate_gap(_pk, _rt):
+                interp.append(f"<b>Peak GRF LSI {_pk:.0f}% vs rate LSI {_rt:.0f}%</b>: " + P.t("drop_jump", "rate_gap"))
         if ll:
             interp.append(
                 f"<b>Landing symmetry {ll:.0f}% LSI</b>: "
                 + ("Good bilateral loading at contact." if 90 <= ll <= 110
                    else f"Surgical limb loading {abs(ll-100):.0f}% {'more' if ll>100 else 'less'} than non-surgical — {'protective offloading of NS side detected' if ll>100 else 'surgical guarding detected'}."))
-        interp.append("<b>Targets:</b> RSI ≥ 1.30 · Landing LSI 90–110% · Load rate LSI ≥ 90% · Knee flexion ≥ 60° · Valgus < 5° · Tibial IR < 10°.")
+        interp.append(P.t("drop_jump", "targets"))
 
         # ── Figures: GRF → sagittal pair → frontal/transverse pair → COP ─────
         grf_fig   = fig_lib.force_time_curve(sigs.get("fz_surg"), sigs.get("fz_ns"), rate_grf,
@@ -1173,35 +1318,23 @@ def build_report(output_path: str, patient_data: dict,
                           "tibial IR", "°", warn=5.0, err=8.0)
         ) if _k_dj else ""
 
-        _dj_cop_sum = (
-            f"AP COP excursion: surgical {ap_s:.0f}mm vs non-surgical {ap_n:.0f}mm — "
-            + ("symmetric forward weight shift." if ap_s is not None and ap_n is not None and abs(ap_s - ap_n) < 5
-               else "reduced anterior shift on surgical side — guarded or restricted loading strategy.")
-        ) if (ap_s is not None and ap_n is not None) else ""
+        _dj_cop_sum = _cop_phrase(ap_s, ap_n)
 
         _dj_sum = _lsi_phrase(dj.landing_lsi_200ms, "bilateral landing symmetry")
         test_story += _test_page("DROP JUMP", rows, interp,
-            fig_full=grf_fig,  cap_full="Bilateral GRF (normalised to BW). Orange = surgical, Blue = non-surgical.",
+            fig_full=grf_fig,  cap_full=P.t("drop_jump", "cap_grf"),
             sum_full=_dj_grf_sum,
-            fig_l=flex_fig,    cap_l="Knee flexion. Target ≥ 60° at contact. Reduced depth = stiff landing strategy.",
+            fig_l=flex_fig,    cap_l=P.t("drop_jump", "cap_flex"),
             sum_l=_dj_flex_sum,
-            fig_r=ank_fig,     cap_r="Ankle dorsiflexion. Restricted dorsiflexion → shifts load to quadriceps / increases ACL stress.",
-            fig_l2=valg_fig,   cap_l2="Knee valgus. Target < 5°. Elevated valgus = medial collapse / ACL re-injury risk.",
+            fig_r=ank_fig,     cap_r=P.t("drop_jump", "cap_ankle"),
+            fig_l2=valg_fig,   cap_l2=P.t("drop_jump", "cap_valgus"),
             sum_l2=_dj_valg_sum,
-            fig_r2=tibr_fig,   cap_r2="Tibial internal rotation. IR > 10° at landing = increased ACL rotational load.",
+            fig_r2=tibr_fig,   cap_r2=P.t("drop_jump", "cap_tib"),
             sum_r2=_dj_tib_sum,
-            fig_cop=cop_fig,   cap_cop="AP COP displacement (zero-centred). Smaller excursion on surgical limb = restricted fore-aft weight transfer / guarded landing strategy.",
+            fig_cop=cop_fig,   cap_cop=P.t("drop_jump", "cap_cop"),
             sum_cop=_dj_cop_sum,
             summary=_dj_sum,
-            description=(
-                "The Drop Jump is a reactive bilateral landing task performed from a standard box height. "
-                "The athlete drops off the box, absorbs the impact with both limbs simultaneously, then immediately "
-                "jumps for maximum height. It tests the athlete's ability to rapidly store and release elastic energy "
-                "(reactive strength) and to absorb high-impact loads symmetrically. Key concerns after ACL reconstruction "
-                "include stiff-knee landing (reduced flexion, elevated impact transient), medial knee collapse (valgus), "
-                "and side-to-side force asymmetries that indicate ongoing limb offloading. The Reactive Strength Index "
-                "(RSI = jump height ÷ contact time) summarises the explosive reactive capacity of the neuromuscular system."
-            ))
+            description=P.t("drop_jump", "description"))
 
     # ── DROP LANDING ──────────────────────────────────────────────────────────
     dl = test_results.get("drop_landing")
@@ -1218,7 +1351,7 @@ def build_report(output_path: str, patient_data: dict,
                 ("Impulse (N·s)",      o.surgical.impulse_Ns,    o.non_surgical.impulse_Ns,    o.lsi_impulse),
             ]
         _reg("DL Load Rate", dl.loading_rate_surg_ns, dl.loading_rate_ns_ns, dl.loading_rate_lsi, "Force")
-        _reg("DL Impact",    dl.impact_transient_surg, dl.impact_transient_ns, dl.impact_transient_lsi, "Force")
+        _reg("DL Impact",    dl.impact_transient_surg, dl.impact_transient_ns, dl.impact_transient_lsi, "Force", "dl_impact_lsi")
         rows += [
             ("Loading Rate 50ms (N/s)", dl.loading_rate_surg_ns,  dl.loading_rate_ns_ns,  dl.loading_rate_lsi),
             ("Impact Transient (N)",    dl.impact_transient_surg, dl.impact_transient_ns, dl.impact_transient_lsi),
@@ -1228,7 +1361,7 @@ def build_report(output_path: str, patient_data: dict,
         if dl.kinematics:
             k = dl.kinematics
             _reg("DL Knee Flexion", k.surg_knee.peak_flexion_deg, k.non_surg_knee.peak_flexion_deg, k.lsi_peak_flexion, "Kinematics")
-            _reg_delta("DL Knee Valgus", k.surg_knee.peak_valgus_deg, k.non_surg_knee.peak_valgus_deg, warn_deg=3.0, err_deg=6.0)
+            _reg_delta("DL Knee Valgus", k.surg_knee.peak_valgus_deg, k.non_surg_knee.peak_valgus_deg, warn_deg=3.0, err_deg=6.0, flag=P.flag_knee_frontal)
             rows += [
                 ("Peak Knee Flexion (°)",    k.surg_knee.peak_flexion_deg,   k.non_surg_knee.peak_flexion_deg,   k.lsi_peak_flexion),
                 _delta_row("Peak Knee Valgus (°)",     k.surg_knee.peak_valgus_deg,    k.non_surg_knee.peak_valgus_deg,    warn_deg=3.0, err_deg=6.0),
@@ -1246,6 +1379,8 @@ def build_report(output_path: str, patient_data: dict,
             ank_s = float(np.nanmax(sigs["ankle_flex_surg"])) if len(sigs["ankle_flex_surg"]) > 0 else None
             ank_n = float(np.nanmax(sigs["ankle_flex_ns"])) if sigs.get("ankle_flex_ns") is not None and len(sigs["ankle_flex_ns"]) > 0 else None
             rows += [_delta_row("Peak Ankle Dorsiflexion (°)", ank_s, ank_n, warn_deg=3.0, err_deg=6.0)]
+            _ankle["seen"] = True
+        rows += [r for r in _ankle_rows({k: v for k, v in sigs.items() if k.startswith("ankle_moment")}, "DL")]
 
         # ── Kinetics ──────────────────────────────────────────────────────────
         km_s = sigs.get("knee_moment_surg")
@@ -1264,15 +1399,20 @@ def build_report(output_path: str, patient_data: dict,
         # ── Interpretation ────────────────────────────────────────────────────
         lr  = dl.loading_rate_lsi  if dl.loading_rate_lsi  == dl.loading_rate_lsi  else None
         imp = dl.impact_transient_lsi if dl.impact_transient_lsi == dl.impact_transient_lsi else None
-        interp = ["Absorptive landing — assesses shock attenuation without a re-jump. Lower, more gradual force = better control."]
+        interp = [P.t("drop_landing", "intro")]
         if lr:
             interp.append(
                 f"<b>Load rate LSI {lr:.0f}%</b>: "
                 + ("Symmetric loading strategy." if 90 <= lr <= 110
                    else f"Surgical limb loading rate {abs(lr-100):.0f}% {'higher' if lr>100 else 'lower'} — {'NS side protective offloading' if lr>100 else 'surgical inhibition'}."))
         if imp:
-            interp.append(f"<b>Impact transient LSI {imp:.0f}%</b>. Target: < 2× BW peak, LSI 90–110%, no sharp spike.")
-        interp.append("<b>Targets:</b> Peak GRF < 3× BW · Load rate LSI 90–110% · Knee flexion ≥ 60° · Valgus < 5° · Tibial IR < 10°.")
+            interp.append(f"<b>Impact transient LSI {imp:.0f}%</b> — "
+                          + ("symmetric initial load acceptance." if 90 <= imp <= 110
+                             else f"surgical limb initial impact {abs(imp-100):.0f}% {'higher' if imp > 100 else 'lower'}."))
+        if P.ankle_focus and _rate_gap(dl.peak_force_lsi, lr):
+            interp.append(f"<b>Peak GRF LSI {dl.peak_force_lsi:.0f}% vs load rate LSI {lr:.0f}%</b>: "
+                          + P.t("drop_landing", "rate_gap"))
+        interp.append(P.t("drop_landing", "targets"))
 
         # ── Figures ───────────────────────────────────────────────────────────
         grf_fig  = fig_lib.force_time_curve(sigs.get("fz_surg"), sigs.get("fz_ns"), rate_grf,
@@ -1323,26 +1463,19 @@ def build_report(output_path: str, patient_data: dict,
 
         _dl_sum = _lsi_phrase(dl.peak_force_lsi, "peak landing force absorption")
         test_story += _test_page("DROP LANDING", rows, interp,
-            fig_full=grf_fig,  cap_full="Bilateral GRF. Smooth progressive rise = good shock absorption. Sharp impact spike = stiff landing.",
+            fig_full=grf_fig,  cap_full=P.t("drop_landing", "cap_grf"),
             sum_full=_dl_grf_sum,
-            fig_l=flex_fig,    cap_l="Knee flexion at landing. Reduced depth = stiff strategy / quad inhibition.",
+            fig_l=flex_fig,    cap_l=P.t("drop_landing", "cap_flex"),
             sum_l=_dl_flex_sum,
-            fig_r=ank_fig,     cap_r="Ankle dorsiflexion. Restricted ROM limits knee flexion depth and increases ACL load.",
-            fig_l2=valg_fig,   cap_l2="Knee valgus at landing. > 8° surgical = elevated ACL stress.",
+            fig_r=ank_fig,     cap_r=P.t("drop_landing", "cap_ankle"),
+            fig_l2=valg_fig,   cap_l2=P.t("drop_landing", "cap_valgus"),
             sum_l2=_dl_valg_sum,
-            fig_r2=tibr_fig,   cap_r2="Tibial IR at landing. Combined with valgus = high ACL injury-risk pattern.",
+            fig_r2=tibr_fig,   cap_r2=P.t("drop_landing", "cap_tib"),
             sum_r2=_dl_tib_sum,
-            fig_cop=cop_fig,   cap_cop="AP COP (zero-centred). Posterior bias on surgical side = heel-dominant / reduced forefoot loading.",
+            fig_cop=cop_fig,   cap_cop=P.t("drop_landing", "cap_cop"),
+            sum_cop=_cop_phrase(ap_s, ap_n),
             summary=_dl_sum,
-            description=(
-                "The Drop Landing isolates the deceleration phase of a jump: the athlete drops from a box and sticks "
-                "the landing bilaterally without a subsequent jump. This removes the propulsive demand and focuses entirely "
-                "on the athlete's ability to safely absorb and dissipate ground reaction forces. After ACL reconstruction, "
-                "common compensations include a stiff-knee strategy (reduced flexion, sharp impact spike), excessive valgus "
-                "collapse, and asymmetric weight acceptance—all of which increase mechanical stress at the reconstructed "
-                "ligament. A smooth, progressive force curve with symmetric knee flexion ≥ 60° and valgus < 8° is the "
-                "clinical target. Loading rate and impact transient LSI reflect side-to-side shock absorption capacity."
-            ))
+            description=P.t("drop_landing", "description"))
 
     # ── MAX VERTICAL JUMP ─────────────────────────────────────────────────────
     mvj = test_results.get("max_vertical")
@@ -1363,7 +1496,7 @@ def build_report(output_path: str, patient_data: dict,
         rows += [
             ("Peak Force Surg / NS (N)",   mvj.peak_force_surg_N, mvj.peak_force_ns_N, mvj.peak_force_lsi),
             ("Propulsion LSI (%)",         "—",                   "—",                 mvj.propulsion_lsi),
-            ("Jump Height",                _fmt(mvj.jump_height_cm, 1), "—",           None),
+            ("Jump Height (in)",           _fmt(mvj.jump_height_cm, 1), "—",           None),
             ("Flight Time (s)",            _fmt(mvj.flight_time_s, 3),  "—",           None),
             ("Unweighting Impulse Surg/NS",_fmt(mvj.unweighting_impulse_surg, 1),
                                            _fmt(mvj.unweighting_impulse_ns, 1), None),
@@ -1373,7 +1506,7 @@ def build_report(output_path: str, patient_data: dict,
         if mvj.kinematics:
             k = mvj.kinematics
             _reg("CMJ Knee Flexion", k.surg_knee.peak_flexion_deg, k.non_surg_knee.peak_flexion_deg, k.lsi_peak_flexion, "Kinematics")
-            _reg_delta("CMJ Knee Valgus", k.surg_knee.peak_valgus_deg, k.non_surg_knee.peak_valgus_deg, warn_deg=3.0, err_deg=6.0)
+            _reg_delta("CMJ Knee Valgus", k.surg_knee.peak_valgus_deg, k.non_surg_knee.peak_valgus_deg, warn_deg=3.0, err_deg=6.0, flag=P.flag_knee_frontal)
             rows += [
                 ("Peak Knee Flexion (°)",    k.surg_knee.peak_flexion_deg,   k.non_surg_knee.peak_flexion_deg,   k.lsi_peak_flexion),
                 _delta_row("Peak Knee Valgus (°)",     k.surg_knee.peak_valgus_deg,    k.non_surg_knee.peak_valgus_deg,    warn_deg=3.0, err_deg=6.0),
@@ -1391,6 +1524,8 @@ def build_report(output_path: str, patient_data: dict,
             ank_s = float(np.nanmax(sigs["ankle_flex_surg"])) if len(sigs["ankle_flex_surg"]) > 0 else None
             ank_n = float(np.nanmax(sigs["ankle_flex_ns"])) if sigs.get("ankle_flex_ns") is not None and len(sigs["ankle_flex_ns"]) > 0 else None
             rows += [_delta_row("Peak Ankle Dorsiflexion (°)", ank_s, ank_n, warn_deg=3.0, err_deg=6.0)]
+            _ankle["seen"] = True
+        rows += _ankle_rows({k: v for k, v in sigs.items() if k.startswith("ankle_moment")}, "CMJ")
 
         # ── Kinetics ──────────────────────────────────────────────────────────
         km_s = sigs.get("knee_moment_surg")
@@ -1409,14 +1544,14 @@ def build_report(output_path: str, patient_data: dict,
         # ── Interpretation ────────────────────────────────────────────────────
         pk  = mvj.peak_force_lsi if mvj.peak_force_lsi == mvj.peak_force_lsi else None
         pro = mvj.propulsion_lsi if mvj.propulsion_lsi == mvj.propulsion_lsi else None
-        interp = ["Bilateral CMJ — sensitive to subtle propulsion deficits masked at lower intensities."]
+        interp = [P.t("max_vertical", "intro")]
         if pk:
             interp.append(
                 f"<b>Peak force LSI {pk:.0f}%</b>: "
                 + ("Symmetric bilateral output." if 90 <= pk <= 110
-                   else f"Surgical limb generating {abs(pk-100):.0f}% {'more' if pk>100 else 'less'} force — {'possible NS compensation' if pk>100 else 'quad/hip extensor deficit; strength work required'}."))
+                   else f"Surgical limb generating {abs(pk-100):.0f}% {'more' if pk>100 else 'less'} force — {'possible NS compensation' if pk>100 else P.t('max_vertical', 'pk_low')}."))
         if pro:
-            interp.append(f"<b>Propulsion LSI {pro:.0f}%</b>. Targets: ≥ 90% propulsion, ≥ 90% peak force, matched unweighting impulse.")
+            interp.append(f"<b>Propulsion LSI {pro:.0f}%</b>. " + P.t("max_vertical", "targets"))
 
         # ── Figures ───────────────────────────────────────────────────────────
         grf_fig  = fig_lib.force_time_curve(sigs.get("fz_surg"), sigs.get("fz_ns"), rate_grf,
@@ -1446,7 +1581,7 @@ def build_report(output_path: str, patient_data: dict,
                    if sigs.get("cop_y_surg") is not None else None
 
         _k_cmj = mvj.kinematics if hasattr(mvj, "kinematics") else None
-        _cmj_grf_sum = _lsi_phrase(mvj.propulsion_lsi, "propulsive peak force")
+        _cmj_grf_sum = _lsi_phrase(mvj.propulsion_lsi, "propulsive impulse")
         _cmj_flex_sum = (
             _lsi_phrase(_k_cmj.lsi_peak_flexion, "countermovement knee flexion depth")
         ) if _k_cmj else ""
@@ -1459,29 +1594,21 @@ def build_report(output_path: str, patient_data: dict,
                           "tibial IR", "°", warn=5.0, err=8.0)
         ) if _k_cmj else ""
 
-        _cmj_sum = _lsi_phrase(mvj.peak_force_lsi, "propulsive force")
+        _cmj_sum = _lsi_phrase(mvj.peak_force_lsi, "peak propulsive force")
         test_story += _test_page("MAX VERTICAL JUMP (CMJ)", rows, interp,
-            fig_full=grf_fig,  cap_full="Full CMJ: unweighting → eccentric load → propulsion → flight. Propulsive peaks should be symmetric.",
+            fig_full=grf_fig,  cap_full=P.t("max_vertical", "cap_grf"),
             sum_full=_cmj_grf_sum,
-            fig_l=flex_fig,    cap_l="Knee flexion depth. Asymmetric countermovement depth = compensatory loading strategy.",
+            fig_l=flex_fig,    cap_l=P.t("max_vertical", "cap_flex"),
             sum_l=_cmj_flex_sum,
-            fig_r=ank_fig,     cap_r="Ankle dorsiflexion. Restricted ROM reduces jump height and shifts load away from the knee.",
-            fig_l2=valg_fig,   cap_l2="Knee valgus during propulsion. Dynamic valgus under load = ACL stress.",
+            fig_r=ank_fig,     cap_r=P.t("max_vertical", "cap_ankle"),
+            fig_l2=valg_fig,   cap_l2=P.t("max_vertical", "cap_valgus"),
             sum_l2=_cmj_valg_sum,
-            fig_r2=tibr_fig,   cap_r2="Tibial IR during propulsion. Coupled with valgus = high re-injury risk pattern.",
+            fig_r2=tibr_fig,   cap_r2=P.t("max_vertical", "cap_tib"),
             sum_r2=_cmj_tib_sum,
-            fig_cop=cop_fig,   cap_cop="AP COP displacement during CMJ (zero-centred). Anterior shift during propulsion drives jump height — asymmetric or reduced excursion on surgical side = limb offloading.",
+            fig_cop=cop_fig,   cap_cop=P.t("max_vertical", "cap_cop"),
+            sum_cop=_cop_phrase(ap_s, ap_n),
             summary=_cmj_sum,
-            description=(
-                "The Countermovement Jump (CMJ) is the gold-standard bilateral power test. The athlete begins in quiet "
-                "stance, rapidly descends into a squat (countermovement), then drives upward for maximum jump height. "
-                "The full GRF waveform reveals each phase: unweighting, eccentric loading, propulsion, and flight. "
-                "After ACL reconstruction, typical deficits include an asymmetric countermovement depth (surgical limb "
-                "offloading during the eccentric phase), reduced propulsive impulse, and side-to-side jump height "
-                "asymmetry. Propulsive LSI < 90% is a common criterion for RTS decisions. Kinematic analysis identifies "
-                "compensatory strategies—valgus, reduced knee flexion, and tibial rotation—that indicate the surgical "
-                "limb is not being loaded with full confidence or mechanical efficiency."
-            ))
+            description=P.t("max_vertical", "description"))
 
     # ── ENDURANCE SQUAT ───────────────────────────────────────────────────────
     esq = test_results.get("endurance_squat")
@@ -1501,13 +1628,13 @@ def build_report(output_path: str, patient_data: dict,
         ]
         drift = esq.fatigue_drift_pct
         dv    = drift if drift is not None and drift == drift else None
-        interp = ["30s bilateral squat — reveals neuromuscular fatigue-induced asymmetry missed by single-rep testing."]
+        interp = [P.t("endurance_squat", "intro")]
         if dv is not None:
             interp.append(
                 f"<b>Fatigue drift {dv:.1f}%</b>: "
                 + ("✓ Symmetry maintained under fatigue." if dv > -5
-                   else f"{'⚠' if dv > -10 else '✗'} LSI declined {abs(dv):.0f}% — surgical limb offloads under prolonged effort. Endurance-specific rehab required."))
-        interp.append("<b>Targets:</b> Mean LSI ≥ 90% · Fatigue drift < 5% · No progressive offloading across 30s.")
+                   else f"{'⚠' if dv > -10 else '✗'} LSI declined {abs(dv):.0f}% — " + P.t("endurance_squat", "drift_bad")))
+        interp.append(P.t("endurance_squat", "targets"))
 
         lsi_fig = fig_lib.endurance_lsi_over_time(esq.lsi_over_time, esq.time_axis,
                       figsize=(4.0, 2.2)) \
@@ -1521,8 +1648,8 @@ def build_report(output_path: str, patient_data: dict,
                       rate=rate_grf, figsize=(7.5, 1.8)) \
                   if sigs.get("cop_y_surg") is not None else None
 
-        ap_s = _ap_excursion(sigs.get("cop_y_surg"), sigs.get("fz_surg"))
-        ap_n = _ap_excursion(sigs.get("cop_y_ns"),   sigs.get("fz_ns"))
+        ap_s = _ap_excursion(sigs.get("cop_y_surg"), sigs.get("fz_surg"), first_only=False)
+        ap_n = _ap_excursion(sigs.get("cop_y_ns"),   sigs.get("fz_ns"),   first_only=False)
         if ap_s is not None or ap_n is not None:
             rows += [("AP COP Excursion — Surg / NS (mm)", ap_s, ap_n, None)]
         km_s = sigs.get("knee_moment_surg")
@@ -1551,17 +1678,7 @@ def build_report(output_path: str, patient_data: dict,
             cap_cop="Bilateral AP COP drift across 30s (zero-centred, 1s RMS envelope). "
                     "Surgical-side amplitude shrinking or trending posterior = offloading under fatigue. "
                     "Diverging traces = progressive asymmetry with sustained effort.",
-            description=(
-                "The 30-Second Endurance Squat assesses neuromuscular fatigue and limb symmetry under sustained "
-                "bilateral loading. The athlete performs continuous bilateral squats to a standardised depth for a "
-                "full 30 seconds. Unlike single-repetition tests, this task reveals how well the neuromuscular system "
-                "maintains symmetry as it fatigues. Athletes post-ACL reconstruction frequently show an initial LSI "
-                "within acceptable range that deteriorates progressively across the set as the nervous system "
-                "disinhibits protective guarding. The COP drift trace exposes this compensation: surgical-limb weight "
-                "transfer decreases, traces diverge, and loading shifts toward the uninvolved side. This test is "
-                "particularly sensitive to residual quadriceps inhibition that is not apparent during brief, "
-                "high-energy tasks."
-            ))
+            description=P.t("endurance_squat", "description"))
 
     # ── SINGLE-LEG VERTICAL JUMP ──────────────────────────────────────────────
     slj = test_results.get("single_leg_jump")
@@ -1572,14 +1689,15 @@ def build_report(output_path: str, patient_data: dict,
         # ── Loading ───────────────────────────────────────────────────────────
         _reg("SL Jump Height", sv.jump_height_cm,        nv.jump_height_cm,        slj.lsi_jump_height, "Force", "sl_jump_lsi")
         _reg("SL Peak GRF",    sv.peak_force_N,          nv.peak_force_N,          slj.lsi_peak_force,  "Force")
-        _reg("SL Impulse",     sv.propulsion_impulse_Ns, nv.propulsion_impulse_Ns, slj.lsi_impulse,     "Force")
+        _reg("SL Net Impulse", sv.propulsion_impulse_Ns, nv.propulsion_impulse_Ns, slj.lsi_impulse,     "Force")
         rows = [
-            ("Jump Height",              sv.jump_height_cm,        nv.jump_height_cm,        slj.lsi_jump_height),
+            ("Jump Height (in)",         sv.jump_height_cm,        nv.jump_height_cm,        slj.lsi_jump_height),
             ("Peak GRF (N)",             sv.peak_force_N,          nv.peak_force_N,          slj.lsi_peak_force),
-            ("Propulsion Impulse (N·s)", sv.propulsion_impulse_Ns, nv.propulsion_impulse_Ns, slj.lsi_impulse),
+            ("Net Impulse (N·s)",        sv.propulsion_impulse_Ns, nv.propulsion_impulse_Ns, slj.lsi_impulse),
             ("RFD 100ms (N/s)",          sv.rfd_100ms,             nv.rfd_100ms,             None),
-            ("Flight Time (s)",          sv.flight_time_s,         nv.flight_time_s,         None),
-            ("Contact Time (s)",         sv.contact_time_s,        nv.contact_time_s,        None),
+            # Flight time omitted: on the trial-averaged force trace it doesn't
+            # match the V3D jump height (e.g. 0.09 s vs a 7 in jump).
+            ("Contact Time (s)",         _fmt(sv.contact_time_s, 2), _fmt(nv.contact_time_s, 2), None),
         ]
 
         # ── Kinematics ────────────────────────────────────────────────────────
@@ -1591,10 +1709,7 @@ def build_report(output_path: str, patient_data: dict,
             tib_s = float(np.nanmax(sigs["tib_rot_surg"])) if len(sigs["tib_rot_surg"]) > 0 else None
             tib_n = float(np.nanmax(sigs["tib_rot_ns"])) if sigs.get("tib_rot_ns") is not None and len(sigs["tib_rot_ns"]) > 0 else None
             rows += [_delta_row("Peak Tibial IR (°)", tib_s, tib_n, warn_deg=5.0, err_deg=8.0)]
-        if sigs.get("ankle_flex_surg") is not None:
-            ank_s = float(np.nanmax(sigs["ankle_flex_surg"])) if len(sigs["ankle_flex_surg"]) > 0 else None
-            ank_n = float(np.nanmax(sigs["ankle_flex_ns"])) if sigs.get("ankle_flex_ns") is not None and len(sigs["ankle_flex_ns"]) > 0 else None
-            rows += [_delta_row("Peak Ankle Dorsiflexion (°)", ank_s, ank_n, warn_deg=3.0, err_deg=6.0)]
+        rows += _ankle_rows(sigs, "SLJ", rtr_key="ankle_moment_lsi")
         if sigs.get("hip_add_surg") is not None:
             hadd_s = float(np.nanmax(sigs["hip_add_surg"])) if len(sigs["hip_add_surg"]) > 0 else None
             hadd_n = float(np.nanmax(sigs["hip_add_ns"])) if sigs.get("hip_add_ns") is not None and len(sigs["hip_add_ns"]) > 0 else None
@@ -1617,15 +1732,19 @@ def build_report(output_path: str, patient_data: dict,
         # ── Interpretation ────────────────────────────────────────────────────
         jh = slj.lsi_jump_height if slj.lsi_jump_height == slj.lsi_jump_height else None
         pk = slj.lsi_peak_force  if slj.lsi_peak_force  == slj.lsi_peak_force  else None
-        interp = ["Highest-demand test — isolates each limb, removing bilateral compensation. Strongest re-injury risk predictor."]
+        interp = [P.t("single_leg_jump", "intro")]
         if jh:
             interp.append(
                 f"<b>Jump height LSI {jh:.0f}%</b>: "
                 + ("✓ Meets RTS threshold (≥ 90%)." if jh >= 90
                    else f"{'⚠' if jh >= 75 else '✗'} {100-jh:.0f}% below non-surgical. {'Continued plyometric loading required' if jh >= 75 else 'RTS not recommended — significant power deficit'}."))
         if pk and pk < 90:
-            interp.append(f"<b>Peak force LSI {pk:.0f}%</b>: Force deficit on surgical side — prioritise quad/hip extensor strengthening.")
-        interp.append("<b>Targets:</b> Jump height LSI ≥ 90% · Peak GRF LSI ≥ 90% · Valgus < 5° · Tibial IR < 10° on surgical limb.")
+            interp.append(f"<b>Peak force LSI {pk:.0f}%</b>: " + P.t("single_leg_jump", "pk_low"))
+        imp_l = slj.lsi_impulse if slj.lsi_impulse == slj.lsi_impulse else None
+        if P.ankle_focus and jh and imp_l and imp_l - jh >= 8:
+            interp.append(f"<b>Net impulse LSI {imp_l:.0f}% vs height LSI {jh:.0f}%</b>: "
+                          + P.t("single_leg_jump", "impulse_gap"))
+        interp.append(P.t("single_leg_jump", "targets"))
 
         # ── Figures ───────────────────────────────────────────────────────────
         grf_fig  = fig_lib.force_time_curve(sigs.get("fz_surg"), sigs.get("fz_ns"), rate_grf,
@@ -1672,27 +1791,19 @@ def build_report(output_path: str, patient_data: dict,
 
         _slj_sum = _lsi_phrase(slj.lsi_jump_height, "single-leg jump height")
         test_story += _test_page("SINGLE-LEG VERTICAL JUMP", rows, interp,
-            fig_full=grf_fig,  cap_full="Per-limb GRF (separate trials). Propulsive peak height and shape should match.",
+            fig_full=grf_fig,  cap_full=P.t("single_leg_jump", "cap_grf"),
             sum_full=_slj_grf_sum,
-            fig_l=flex_fig,    cap_l="Knee flexion per limb. Reduced surgical depth = power deficit or guarded strategy.",
+            fig_l=flex_fig,    cap_l=P.t("single_leg_jump", "cap_flex"),
             sum_l=_slj_flex_sum,
-            fig_r=ank_fig,     cap_r="Ankle dorsiflexion per limb. Restricted ROM = reduced propulsive range / increased ACL load.",
-            fig_l2=valg_fig,   cap_l2="Knee valgus per limb. Elevated surgical valgus under single-leg load = re-injury risk.",
+            fig_r=ank_fig,     cap_r=P.t("single_leg_jump", "cap_ankle"),
+            fig_l2=valg_fig,   cap_l2=P.t("single_leg_jump", "cap_valgus"),
             sum_l2=_slj_valg_sum,
-            fig_r2=tibr_fig,   cap_r2="Tibial IR per limb. Surgical-side IR > 10° = high rotational ACL stress pattern.",
+            fig_r2=tibr_fig,   cap_r2=P.t("single_leg_jump", "cap_tib"),
             sum_r2=_slj_tib_sum,
-            fig_cop=cop_fig,   cap_cop="AP COP displacement (zero-centred, per limb trial). Reduced anterior excursion on surgical side = guarded takeoff / limited push-off.",
+            fig_cop=cop_fig,   cap_cop=P.t("single_leg_jump", "cap_cop"),
+            sum_cop=_cop_phrase(ap_s, ap_n),
             summary=_slj_sum,
-            description=(
-                "The Single-Leg Vertical Jump isolates each limb independently, removing the ability of the uninvolved "
-                "leg to compensate. The athlete performs a maximal countermovement jump landing on the same leg. "
-                "Jump height LSI (surgical vs. non-surgical) is among the most sensitive power-based RTS criteria—"
-                "a threshold of ≥ 90% is widely cited in ACL literature. Single-leg testing also reveals subtle "
-                "compensations masked in bilateral tasks: reduced propulsive depth, hip drop (Trendelenburg pattern), "
-                "and increased tibial rotation are common markers of residual neuromuscular asymmetry. Pelvis drop "
-                "depth quantifies hip abductor control on the stance limb, which is an independent predictor of "
-                "re-injury risk following return to sport."
-            ))
+            description=P.t("single_leg_jump", "description"))
 
     # ── PROPRIOCEPTION ────────────────────────────────────────────────────────
     prop = test_results.get("proprioception")
@@ -1733,14 +1844,23 @@ def build_report(output_path: str, patient_data: dict,
 
             interp = [lsi_note]
             if sv and nv:
-                interp.append(
-                    f"Surgical {sv:.0f} mm/s vs Non-Surgical {nv:.0f} mm/s — "
-                    + ("Surgical limb less stable. Proprioceptive retraining indicated."
-                       if sv > nv else "COP velocity comparable between limbs."))
+                if vlsi is not None and vlsi >= 90:
+                    verdict = "COP velocity comparable between limbs."
+                elif sv > nv:
+                    verdict = "Surgical limb less stable. Proprioceptive retraining indicated."
+                else:
+                    verdict = "Surgical limb steadier than non-surgical."
+                interp.append(f"Surgical {sv:.0f} mm/s vs Non-Surgical {nv:.0f} mm/s — {verdict}")
             if vlsi:
                 interp.append(
-                    f"<b>COP Velocity LSI {vlsi:.0f}%</b> (NS÷Surg×100 — lower = better). "
-                    f"Normative target: &lt; {norm_vel} mm/s. LSI target ≥ 90%.")
+                    f"<b>COP Velocity LSI {vlsi:.0f}%</b> (NS÷Surg×100; below 100% = surgical side sways more). "
+                    f"LSI target ≥ 90%. COP low-pass filtered at 10 Hz.")
+            bad = [lbl for lbl, limb in (("surgical", sc), ("non-surgical", nc))
+                   if getattr(limb, "suspect", False)]
+            if bad:
+                interp.append(
+                    f"<b>⚠ Data check:</b> COP range on the {' and '.join(bad)} trial exceeds 150 mm — "
+                    f"likely a foot shift or touchdown rather than sway. Review / re-collect before relying on this page.")
 
             cop_fig = fig_lib.cop_scatter(
                           sigs.get("cop_x_surg"), sigs.get("cop_y_surg"),
@@ -1750,19 +1870,8 @@ def build_report(output_path: str, patient_data: dict,
 
             return _test_page(title, rows, interp,
                 fig_full=cop_fig,
-                cap_full="COP trajectory — eyes closed. Tighter ellipse = better joint position sense. 95% confidence ellipse shown.",
-                description=(
-                    "The Balance / Proprioception test assesses joint position sense and neuromuscular control under "
-                    "sensory challenge. The athlete stands on a single leg with eyes closed, removing visual "
-                    "compensation and isolating the mechanoreceptor feedback system of the ankle and knee. Center of "
-                    "Pressure (COP) velocity is the most sensitive metric: a higher velocity indicates greater "
-                    "corrective activity, meaning the neuromuscular system is working harder to maintain stability. "
-                    "After ACL reconstruction, deficits in mechanoreceptor density within the graft and capsular "
-                    "tissue result in elevated COP velocity and a larger sway ellipse on the surgical limb. The Airex "
-                    "pad condition adds an unstable surface to further stress the proprioceptive system, revealing "
-                    "deficits that may be masked on firm ground. Symmetry between limbs (LSI ≥ 85–90%) is the "
-                    "primary RTS criterion for this test."
-                ))
+                cap_full="COP trajectory (10 Hz low-pass) — eyes closed. Tighter ellipse = steadier stance. 95% confidence ellipse shown.",
+                description=P.t("balance", "description"))
 
         # Standard condition (PCTL1 / PCTR1 — flat firm surface)
         test_story += _prop_page(
@@ -1771,8 +1880,7 @@ def build_report(output_path: str, patient_data: dict,
             norm_vel=12,
             lsi_note="Eyes-closed single-leg stance on firm surface. "
                      "COP velocity is the most sensitive metric — "
-                     "higher speed = more corrective activity = reduced proprioception. "
-                     "Target: &lt; 12 mm/s.",
+                     "higher speed = more corrective activity = reduced proprioception.",
         )
 
         # Airex condition (PCTL2 / PCTR2 — unstable foam pad)
@@ -1806,6 +1914,30 @@ def build_report(output_path: str, patient_data: dict,
             clinical_notes.append(
                 f"Triple Hop: LSI {th_lsi:.1f}% — below 90% target")
 
+    # ── Profile-specific manual tests (e.g. heel raise for Achilles) ─────────
+    manual = (patient_data or {}).get("manual_tests") or {}
+    for mt_def in P.manual_tests:
+        mt = manual.get(mt_def.key) or {}
+        if mt.get("surg") is None and mt.get("ns") is None:
+            if mt_def.rtr_key and P.t("summary", "heel_missing") and mt_def.key == "heel_raise":
+                summary_notes.append(P.t("summary", "heel_missing"))
+            continue
+        _reg(mt_def.label, mt.get("surg"), mt.get("ns"), mt.get("lsi"),
+             mt_def.domain, mt_def.rtr_key)
+        if mt.get("lsi") is not None and 75 <= mt["lsi"] < 90:
+            clinical_notes.append(f"{mt_def.label}: LSI {mt['lsi']:.1f}% — below 90% target")
+
+    if P.ankle_focus and not _ankle["seen"] and P.t("summary", "ankle_missing"):
+        summary_notes.append(P.t("summary", "ankle_missing"))
+    if P.t("summary", "focus"):
+        summary_notes.insert(0, P.t("summary", "focus"))
+
+    # Worst first, so the summary page shows the most important flags
+    def _flag_sort(note):
+        m = _re.search(r"LSI ([0-9.]+)%", note)
+        return float(m.group(1)) if m else 50.0   # Δ-flags sort with the reds
+    clinical_notes.sort(key=_flag_sort)
+
     # ── Summary (built after test pages so all metrics are collected) ─────────
     domain_avg = {k: sum(v) / len(v) for k, v in domain_scores.items() if v}
 
@@ -1813,7 +1945,7 @@ def build_report(output_path: str, patient_data: dict,
     if patient_data.get("months_since_surgery") is not None:
         rtr_metrics_full["_months_since_surgery"] = patient_data["months_since_surgery"]
 
-    rtr_result = compute_rtr_score(rtr_metrics_full)
+    rtr_result = compute_rtr_score(rtr_metrics_full, P)
 
     summary_story = _exec_summary(
         s=s,
@@ -1822,6 +1954,9 @@ def build_report(output_path: str, patient_data: dict,
         domain_scores=domain_avg,
         clinical_notes=clinical_notes,
         rtr_result=rtr_result,
+        profile=P,
+        summary_notes=summary_notes,
+        influence_names={**_INFLUENCE_NAMES, **P.influence_names},
     )
 
     full_story = summary_story + test_story

@@ -6,9 +6,14 @@ Return-to-Sport Reporting Pipeline — single entry point.
 HOW TO USE
 ----------
   1. Set SESSION_FOLDER to the patient's export folder.
-  2. Set PATIENT_NAME and SURGICAL_SIDE for this patient.
-  3. Run:  python main.py
+  2. Run:  python main.py
      OR:   python main.py "D:\\RTS 2.0\\Data Exports\\Smith John 2024-01-15"
+     OR:   python main.py "<folder>" --profile achilles --side L
+  3. Pick the report type (ACL / Knee, Achilles, ...) in the first dialog.
+     The choice decides the clinical wording, targets, scoring weights and
+     any extra clinic tests asked for (e.g. heel-raise reps for Achilles).
+     Skip the dialog with --profile <key> or REPORT_PROFILE in config.py.
+     Report types live in profiles/ — see profiles/base.py to add one.
 
 What this script does
 ---------------------
@@ -566,6 +571,186 @@ def _ask_triple_hop(patient_name: str) -> dict:
         return result
 
 
+def _ask_report_profile(patient_name: str) -> str:
+    """
+    Branded dialog: one button per report profile (profiles.PROFILES).
+    Returns the chosen profile key. Falls back to the default profile if
+    tkinter is unavailable; re-prompts if the window is closed.
+    """
+    from profiles import PROFILES, DEFAULT_PROFILE
+
+    BG     = "#39414a"
+    BG_BTN = "#2a3038"
+    FG     = "#ffffff"
+    FG_SUB = "#c8cdd3"
+    ORANGE = "#fc6c0f"
+
+    try:
+        import tkinter as tk
+
+        chosen = [None]
+
+        root = tk.Tk()
+        root.title("RTS Reporting — Report Type")
+        root.resizable(False, False)
+        root.configure(bg=BG)
+
+        W, H = 440, 150 + 72 * len(PROFILES)
+        root.update_idletasks()
+        sx = (root.winfo_screenwidth()  - W) // 2
+        sy = (root.winfo_screenheight() - H) // 2
+        root.geometry(f"{W}x{H}+{sx}+{sy}")
+        root.lift()
+        root.attributes("-topmost", True)
+
+        tk.Label(root, text=CLINIC_NAME, bg=BG, fg=FG,
+                 font=("Helvetica", 13, "bold")).pack(pady=(16, 2))
+        tk.Label(root, text="Return to Sport Assessment", bg=BG, fg=FG_SUB,
+                 font=("Helvetica", 9)).pack()
+        tk.Label(root, text=f"Patient:  {patient_name}", bg=BG, fg=FG,
+                 font=("Helvetica", 10)).pack(pady=(8, 2))
+        tk.Label(root, text="Which report should be generated?", bg=BG, fg=FG_SUB,
+                 font=("Helvetica", 9)).pack(pady=(2, 10))
+
+        def _pick(key):
+            chosen[0] = key
+            root.destroy()
+
+        for i, p in enumerate(PROFILES):
+            f = tk.Frame(root, bg=BG)
+            f.pack(fill="x", padx=24, pady=4)
+            tk.Button(f, text=p.menu_label, width=14, height=1,
+                      font=("Helvetica", 12, "bold"), relief="flat", cursor="hand2",
+                      bg=ORANGE if p.key == DEFAULT_PROFILE else BG_BTN, fg=FG,
+                      activebackground="#d45a00", activeforeground=FG,
+                      command=lambda k=p.key: _pick(k)).pack(side="left")
+            tk.Label(f, text=p.menu_blurb, bg=BG, fg=FG_SUB, wraplength=230,
+                     justify="left", font=("Helvetica", 8)).pack(side="left", padx=10)
+
+        root.mainloop()
+
+        if chosen[0] is None:
+            print("[main] WARNING: Report-type dialog closed without selection — re-prompting.")
+            return _ask_report_profile(patient_name)
+        return chosen[0]
+
+    except Exception as exc:
+        print(f"[main] WARNING: Could not show report-type dialog ({exc}). "
+              f"Defaulting to '{DEFAULT_PROFILE}'.")
+        return DEFAULT_PROFILE
+
+
+def _ask_limb_pair(patient_name: str, mt) -> dict:
+    """
+    Branded dialog for a profile's manual clinic test (profiles.ManualTest),
+    e.g. single-leg heel-raise reps. Returns {label, unit, surg, ns, lsi}
+    (values None if skipped).
+    """
+    BG      = "#39414a"
+    BG_DARK = "#2a3038"
+    FG      = "#ffffff"
+    FG_SUB  = "#c8cdd3"
+    ORANGE  = "#fc6c0f"
+
+    result = {"label": mt.label, "unit": mt.unit, "surg": None, "ns": None, "lsi": None}
+
+    def _parse(txt):
+        txt = txt.strip()
+        if not txt:
+            return None
+        try:
+            v = int(txt) if mt.integer else float(txt)
+            return v if v >= 0 else None
+        except ValueError:
+            return "bad"
+
+    try:
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.withdraw()
+        win = tk.Toplevel(root)
+        win.title(f"RTS Reporting — {mt.title}")
+        win.resizable(False, False)
+        win.configure(bg=BG)
+        win.lift()
+        win.attributes("-topmost", True)
+        win.focus_force()
+
+        W, H = 420, 300
+        win.update_idletasks()
+        sx = (win.winfo_screenwidth()  - W) // 2
+        sy = (win.winfo_screenheight() - H) // 2
+        win.geometry(f"{W}x{H}+{sx}+{sy}")
+
+        tk.Label(win, text=CLINIC_NAME, bg=BG, fg=FG,
+                 font=("Helvetica", 13, "bold")).pack(pady=(14, 2))
+        tk.Label(win, text=mt.title, bg=BG, fg=FG_SUB, font=("Helvetica", 9)).pack()
+        tk.Label(win, text=f"Patient:  {patient_name}", bg=BG, fg=FG,
+                 font=("Helvetica", 10)).pack(pady=(6, 2))
+        tk.Label(win, text=mt.prompt, bg=BG, fg=FG_SUB, font=("Helvetica", 8),
+                 justify="center").pack(pady=(4, 8))
+
+        row = tk.Frame(win, bg=BG)
+        row.pack()
+
+        def _col(label):
+            f = tk.Frame(row, bg=BG)
+            f.pack(side="left", padx=18)
+            tk.Label(f, text=label, bg=BG, fg=FG_SUB, font=("Helvetica", 9)).pack()
+            var = tk.StringVar()
+            e = tk.Entry(f, textvariable=var, font=("Helvetica", 14, "bold"),
+                         justify="center", width=10, bd=0, relief="flat",
+                         bg=BG_DARK, fg=FG, insertbackground=ORANGE)
+            e.pack(ipady=6)
+            return var, e
+
+        s_var, s_entry = _col(f"Surgical ({mt.unit})" if mt.unit else "Surgical")
+        n_var, n_entry = _col(f"Non-Surgical ({mt.unit})" if mt.unit else "Non-Surgical")
+
+        def _flash(e):
+            e.configure(bg="#5a2a2a")
+            e.after(600, lambda: e.configure(bg=BG_DARK))
+
+        def _submit(event=None):
+            sv, nv = _parse(s_var.get()), _parse(n_var.get())
+            if sv == "bad":
+                _flash(s_entry)
+            if nv == "bad":
+                _flash(n_entry)
+            if "bad" in (sv, nv):
+                return
+            result["surg"], result["ns"] = sv, nv
+            if sv is not None and nv:
+                result["lsi"] = round(sv / nv * 100.0, 1)
+            win.destroy()
+
+        def _skip(event=None):
+            win.destroy()
+
+        s_entry.bind("<Return>", lambda e: n_entry.focus_set())
+        n_entry.bind("<Return>", _submit)
+        win.bind("<Escape>", _skip)
+        s_entry.focus_set()
+
+        bf = tk.Frame(win, bg=BG)
+        bf.pack(pady=12)
+        tk.Button(bf, text="Confirm", command=_submit, bg=ORANGE, fg=FG,
+                  font=("Helvetica", 10, "bold"), relief="flat", cursor="hand2",
+                  padx=16).pack(side="left", padx=8)
+        tk.Button(bf, text="Skip", command=_skip, bg=BG_DARK, fg=FG_SUB,
+                  font=("Helvetica", 10), relief="flat", cursor="hand2",
+                  padx=16).pack(side="left", padx=8)
+
+        root.wait_window(win)
+        root.destroy()
+        return result
+
+    except Exception as exc:
+        print(f"[main] WARNING: Could not show {mt.title} dialog ({exc}). Skipping.")
+        return result
+
+
 def _months_since(date_str: str, reference: datetime.date = None) -> float:
     """
     Parse surgery date: YYYY-MM-DD, MM/DD/YY(Y), or MM/YY(Y).
@@ -601,6 +786,11 @@ from config import (
     ANALOG_RATE, KINEMATIC_RATE, JUMP_HEIGHT_SCALE,
     PATIENT_NAME, SURGICAL_SIDE, SURGERY_DATE, COFP_TO_MM, CLINIC_NAME,
 )
+try:
+    from config import REPORT_PROFILE
+except ImportError:          # older config.py without the setting
+    REPORT_PROFILE = ""
+from profiles import get_profile, PROFILES_BY_KEY
 from helpers.parser import parse_v3d_file, V3DExport
 from helpers.report import build_report
 
@@ -734,17 +924,35 @@ def _peak_knee_moment(moments_export: V3DExport, side: str) -> float:
     return float(np.nanmax(ts))
 
 
+def _peak_ankle_moment(moments_export: V3DExport, side: str) -> float:
+    """
+    Peak ankle sagittal moment magnitude (Nm) — plantarflexor demand.
+    Needs L_/R_Ankle_Moment in the V3D Moments export (not in the default
+    pipeline yet). Uses |X| so the result doesn't depend on V3D's sign
+    convention. Returns NaN if unavailable.
+    """
+    if moments_export is None:
+        return float("nan")
+    ts = moments_export.timeseries(f"{side.upper()}_Ankle_Moment", "X")
+    if ts is None or len(ts) == 0:
+        return float("nan")
+    return float(np.nanmax(np.abs(ts)))
+
+
 # ─── Main pipeline ────────────────────────────────────────────────────────────
 
 def run(session_folder: str,
         patient_name: str = None,
-        surg_side: str = None):
+        surg_side: str = None,
+        profile_key: str = None):
     """
     Run the full RTS pipeline for one patient session.
 
     session_folder : path containing all V3D export .txt files
     patient_name   : overrides config.PATIENT_NAME if provided
     surg_side      : overrides config.SURGICAL_SIDE if provided ('L' or 'R')
+    profile_key    : report type ('acl', 'achilles', ...); overrides
+                     config.REPORT_PROFILE. None/blank → picker dialog.
     """
     folder = Path(session_folder)
     if not folder.exists():
@@ -780,6 +988,16 @@ def run(session_folder: str,
             raw_name     = _ask_patient_name()
             display_name = raw_name
 
+    # ── Report type (profile) ─────────────────────────────────────────────────
+    if profile_key and profile_key.strip():
+        prof_key = profile_key.strip().lower()
+    elif REPORT_PROFILE and REPORT_PROFILE.strip():
+        prof_key = REPORT_PROFILE.strip().lower()
+    else:
+        prof_key = _ask_report_profile(display_name)
+    profile = get_profile(prof_key)
+    print(f"  Report type  : {profile.menu_label}")
+
     # ── Surgical side ─────────────────────────────────────────────────────────
     if surg_side and surg_side.upper() in ("L", "R"):
         side = surg_side.upper()
@@ -812,6 +1030,16 @@ def run(session_folder: str,
     else:
         print("  Triple Hop   : skipped")
 
+    # ── Profile-specific clinic tests (e.g. heel raise for Achilles) ─────────
+    manual_tests = {}
+    for mt in profile.manual_tests:
+        res_mt = _ask_limb_pair(display_name, mt)
+        manual_tests[mt.key] = res_mt
+        if res_mt.get("lsi") is not None:
+            print(f"  {mt.label:<12} : Surg={res_mt['surg']} NS={res_mt['ns']}  LSI={res_mt['lsi']:.1f}%")
+        else:
+            print(f"  {mt.label:<12} : skipped")
+
     # ── Session date (from embedded C3D paths, fall back to today) ────────────
     # date_str format: MM-DD-YY  e.g. "12-03-25"
     date_str_short = session_info.get("session_date") or \
@@ -839,6 +1067,7 @@ def run(session_folder: str,
     print(f"  Session  : {folder.name}")
     print(f"  Date     : {test_date_long}")
     print(f"  Surg side: {side}")
+    print(f"  Report   : {profile.menu_label}")
     print(f"  Body wt  : {bw_n:.1f} N  ({bw_n/9.81:.1f} kg)")
     print(f"  Saving to: {out_folder}")
     print(f"{'='*62}\n")
@@ -856,6 +1085,8 @@ def run(session_folder: str,
         "surgery_date":       surgery_date_str or "",
         "months_since_surgery": months_post_op,   # float or None
         "triple_hop":         triple_hop,          # {surg_in, ns_in, lsi} or all None
+        "manual_tests":       manual_tests,        # {key: {label, unit, surg, ns, lsi}}
+        "profile_key":        profile.key,
     }
 
     test_results = {}
@@ -884,13 +1115,31 @@ def run(session_folder: str,
             hip_ns=hip_ns_dj,
             rate_k=KINEMATIC_RATE, scalars=sc,
         )
-        # Prefer V3D-computed scalars over time-series estimates
-        if not np.isnan(sc.get("RSI", np.nan)):
-            res.rsi = float(sc["RSI"])
-        if not np.isnan(sc.get("JH_IN", np.nan)):
-            res.jump_height_cm = float(sc["JH_IN"]) * JUMP_HEIGHT_SCALE
+        # Prefer V3D-computed jump height / contact time over time-series
+        # estimates (the averaged force trace blurs flight time).
+        #
+        # JH_IN is INCHES (it matches JT via h = g·t²/8). The report shows
+        # jump height in inches; `jump_height_cm` is a legacy field name.
+        # RSI is recomputed here in m/s from the same JH_IN and CT, because
+        # V3D's own RSI scalar does not match JH_IN ÷ CT (it came out ~2×
+        # too high, e.g. 2.63 with a 0.47 s contact) and was then scored as
+        # a top "strength".
+        jh_in = sc.get("JH_IN", np.nan)
+        if not np.isnan(jh_in):
+            res.jump_height_cm = float(jh_in) * JUMP_HEIGHT_SCALE
+        elif not np.isnan(res.jump_height_cm):
+            res.jump_height_cm = res.jump_height_cm / 2.54      # cm → in
+            jh_in = res.jump_height_cm
         if not np.isnan(sc.get("CT", np.nan)):
             res.contact_time_s = float(sc["CT"])
+        if not np.isnan(jh_in) and res.contact_time_s == res.contact_time_s \
+                and res.contact_time_s > 0:
+            res.rsi = (float(jh_in) * 0.0254) / res.contact_time_s
+        v3d_rsi = sc.get("RSI", np.nan)
+        if not np.isnan(v3d_rsi) and res.rsi == res.rsi and \
+                abs(v3d_rsi - res.rsi) > 0.15 * max(res.rsi, 1e-6):
+            print(f"  NOTE: V3D RSI scalar ({v3d_rsi:.3f}) ≠ JH/CT ({res.rsi:.3f} m/s) — "
+                  f"report uses JH/CT.")
 
         test_results["drop_jump"] = res
         dj_cofp    = _load(folder, "drop_jump_cofp",    rate=ANALOG_RATE)
@@ -916,9 +1165,11 @@ def run(session_folder: str,
             "cop_y_ns":          _cofp_mm(dj_cofp, _ns_plate(side),   "Y"),
             "knee_moment_surg":  _peak_knee_moment(dj_moments, side),
             "knee_moment_ns":    _peak_knee_moment(dj_moments, ns),
+            "ankle_moment_surg": _peak_ankle_moment(dj_moments, side),
+            "ankle_moment_ns":   _peak_ankle_moment(dj_moments, ns),
         }
-        print(f"  RSI           = {res.rsi:.3f}")
-        print(f"  Jump height   = {res.jump_height_cm:.2f} (V3D units)")
+        print(f"  RSI           = {res.rsi:.3f} m/s")
+        print(f"  Jump height   = {res.jump_height_cm:.2f} in")
         print(f"  Contact time  = {res.contact_time_s:.3f} s")
         print(f"  Landing LSI   = {res.landing_lsi_200ms:.1f}%")
         print(f"  Load rate LSI = {res.loading_rate_lsi:.1f}%")
@@ -973,6 +1224,8 @@ def run(session_folder: str,
             "cop_y_ns":          _cofp_mm(dl_cofp, _ns_plate(side),   "Y"),
             "knee_moment_surg":  _peak_knee_moment(dl_moments, side),
             "knee_moment_ns":    _peak_knee_moment(dl_moments, ns),
+            "ankle_moment_surg": _peak_ankle_moment(dl_moments, side),
+            "ankle_moment_ns":   _peak_ankle_moment(dl_moments, ns),
         }
         print(f"  Impact LSI    = {res.impact_transient_lsi:.1f}%")
         print(f"  Load rate LSI = {res.loading_rate_lsi:.1f}%")
@@ -1043,6 +1296,8 @@ def run(session_folder: str,
             "cop_y_ns":          _cofp_mm(mv_cofp, _ns_plate(side),   "Y"),
             "knee_moment_surg":  _peak_knee_moment(mv_moments, side),
             "knee_moment_ns":    _peak_knee_moment(mv_moments, ns),
+            "ankle_moment_surg": _peak_ankle_moment(mv_moments, side),
+            "ankle_moment_ns":   _peak_ankle_moment(mv_moments, ns),
         }
         print(f"  Jump height   = {res.jump_height_cm:.2f} (V3D units)")
         print(f"  Propulsion LSI= {res.propulsion_lsi:.1f}%")
@@ -1176,6 +1431,8 @@ def run(session_folder: str,
             "cop_y_ns":          _cofp_mm(sl_ns_cofp,   "FP3", "Y"),
             "knee_moment_surg":  _peak_knee_moment(sl_surg_mom, side),
             "knee_moment_ns":    _peak_knee_moment(sl_ns_mom,   ns),
+            "ankle_moment_surg": _peak_ankle_moment(sl_surg_mom, side),
+            "ankle_moment_ns":   _peak_ankle_moment(sl_ns_mom,   ns),
         }
         print(f"  Surg jump ht = {res.surgical.jump_height_cm:.2f} (V3D units)")
         print(f"  NS   jump ht = {res.non_surgical.jump_height_cm:.2f} (V3D units)")
@@ -1209,6 +1466,17 @@ def run(session_folder: str,
         airex_xs, airex_ys = _cop(pctr2, "X"), _cop(pctr2, "Y")
         airex_xn, airex_yn = _cop(pctl2, "X"), _cop(pctl2, "Y")
 
+    # Stance-plate Fz — lets the analysis drop frames where the other foot
+    # touched down off-plate or the athlete stepped on / off.
+    def _fz(key):
+        return _load(folder, key, rate=ANALOG_RATE).timeseries("FP3", "Z")
+    if side == "L":
+        prop_fz = {"surg_std": _fz("pctl1_forces"), "ns_std": _fz("pctr1_forces"),
+                   "surg_airex": _fz("pctl2_forces"), "ns_airex": _fz("pctr2_forces")}
+    else:
+        prop_fz = {"surg_std": _fz("pctr1_forces"), "ns_std": _fz("pctl1_forces"),
+                   "surg_airex": _fz("pctr2_forces"), "ns_airex": _fz("pctl2_forces")}
+
     from config import PROP_TRIM_SECONDS
     has_prop = any(a is not None for a in [std_xs, std_xn, airex_xs, airex_xn])
     if has_prop:
@@ -1221,6 +1489,7 @@ def run(session_folder: str,
                 rate_f=ANALOG_RATE,
                 surg_side=side,
                 trim_seconds=PROP_TRIM_SECONDS,
+                fz=prop_fz,
             )
             test_results["proprioception"] = res
 
@@ -1286,7 +1555,8 @@ def run(session_folder: str,
     # Filename format: "RTS Report_Temperance Lyons_12-03-25.pdf"
     # (RTS Report first, First Last name, session date MM-DD-YY)
     safe_name   = re.sub(r'[\\/:*?"<>|]', "_", display_name).strip()
-    output_path = str(out_folder / f"RTS Report_{safe_name}_{date_str_short}.pdf")
+    report_word = f"RTS {profile.file_tag} Report" if profile.file_tag else "RTS Report"
+    output_path = str(out_folder / f"{report_word}_{safe_name}_{date_str_short}.pdf")
     print(f"[main] Generating PDF → {output_path}")
     build_report(
         output_path=output_path,
@@ -1294,6 +1564,7 @@ def run(session_folder: str,
         test_results=test_results,
         all_signals=all_signals,
         rtr_metrics=rtr_metrics,
+        profile=profile,
     )
     print(f"\n✓ Done!  Report saved to: {output_path}\n")
     return output_path
@@ -1340,7 +1611,7 @@ def _collect_rtr_metrics(results: dict) -> dict:
         m["cop_velocity_lsi"] = prop.standard.lsi_cop_velocity
 
     # ── Endurance Squat ───────────────────────────────────────────────────────
-    end = results.get("endurance")
+    end = results.get("endurance_squat")
     if end:
         if not _isnan(end.mean_lsi_peak):
             m["endurance_lsi"] = end.mean_lsi_peak
@@ -1362,6 +1633,14 @@ def _isnan(v) -> bool:
 
 
 if __name__ == "__main__":
-    # CLI: python main.py "D:\path\to\session"
-    session = sys.argv[1] if len(sys.argv) > 1 else SESSION_FOLDER
-    run(session_folder=session)
+    # CLI:  python main.py ["D:\path\to\session"] [--profile achilles] [--side L]
+    import argparse
+    ap = argparse.ArgumentParser(description="RTS Reporting Pipeline")
+    ap.add_argument("session", nargs="?", default=SESSION_FOLDER,
+                    help="Folder containing the V3D export .txt files")
+    ap.add_argument("--profile", "-p", choices=sorted(PROFILES_BY_KEY),
+                    help="Report type; omit to choose in a dialog")
+    ap.add_argument("--side", choices=["L", "R", "l", "r"],
+                    help="Surgical side; omit to use config / dialog")
+    args = ap.parse_args()
+    run(session_folder=args.session, surg_side=args.side, profile_key=args.profile)

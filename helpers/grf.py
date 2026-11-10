@@ -252,6 +252,76 @@ def analyse_phased(fz_surg: np.ndarray, fz_non_surg: np.ndarray,
     }
 
 
+# ─── COP helpers ──────────────────────────────────────────────────────────────
+
+# COP is only meaningful when the plate carries real load. Near touchdown /
+# take-off Fz is small and COP = M / Fz blows up, which produced the 600+ mm
+# "excursions" seen on jump tests. These defaults keep only loaded frames.
+COP_MIN_FORCE_N   = 100.0   # absolute floor (N)
+COP_EDGE_TRIM_MS  = 20.0    # drop this much at each edge of a contact
+COP_LOWPASS_HZ    = 10.0    # balance COP low-pass cutoff (Hz)
+
+
+def cop_contact_mask(fz: np.ndarray, rate: float, n: int = None,
+                     first_only: bool = True,
+                     min_force: float = COP_MIN_FORCE_N,
+                     edge_ms: float = COP_EDGE_TRIM_MS) -> Optional[np.ndarray]:
+    """
+    Boolean mask of frames where COP is trustworthy.
+
+    fz         : vertical force for the same plate (N)
+    n          : length of the COP array (mask is padded / trimmed to it)
+    first_only : keep only the first contact period (e.g. the DJ landing /
+                 CMJ propulsion stance before take-off), not the re-landing
+    Returns None if fz is unavailable.
+    """
+    if fz is None or len(fz) == 0:
+        return None
+    n = len(fz) if n is None else n
+    f = np.nan_to_num(np.asarray(fz, dtype=float)[:n])
+    contacts = detect_contacts(f, threshold=min_force)
+    mask = np.zeros(n, dtype=bool)
+    edge = int(edge_ms * rate / 1000.0)
+    for i, (s, e) in enumerate(contacts):
+        s2, e2 = s + edge, e - edge
+        if e2 > s2:
+            mask[s2:e2 + 1] = True
+        if first_only:
+            break
+    return mask
+
+
+def lowpass(x: np.ndarray, rate: float, cutoff: float = COP_LOWPASS_HZ) -> np.ndarray:
+    """
+    Zero-phase 2nd-order Butterworth low-pass (forward-backward → 4th order).
+    Pure numpy so scipy isn't required.
+    """
+    x = np.asarray(x, dtype=float)
+    if len(x) < 12 or cutoff <= 0 or cutoff >= rate / 2:
+        return x.copy()
+    # Bilinear-transform biquad coefficients
+    wc = np.tan(np.pi * cutoff / rate)
+    k1 = np.sqrt(2.0) * wc
+    k2 = wc * wc
+    a0 = 1.0 + k1 + k2
+    b = np.array([k2, 2 * k2, k2]) / a0
+    a = np.array([1.0, 2 * (k2 - 1.0) / a0, (1.0 - k1 + k2) / a0])
+
+    def _filt(sig):
+        y = np.empty_like(sig)
+        x1 = x2 = sig[0]
+        y1 = y2 = sig[0]
+        for i, xi in enumerate(sig):
+            yi = b[0] * xi + b[1] * x1 + b[2] * x2 - a[1] * y1 - a[2] * y2
+            x2, x1 = x1, xi
+            y2, y1 = y1, yi
+            y[i] = yi
+        return y
+
+    xi = np.nan_to_num(x, nan=float(np.nanmean(x)) if np.any(~np.isnan(x)) else 0.0)
+    return _filt(_filt(xi)[::-1])[::-1]
+
+
 def analyse_cop(cop_x: np.ndarray, cop_y: np.ndarray,
                 rate: float, side: str) -> COPMetrics:
     """

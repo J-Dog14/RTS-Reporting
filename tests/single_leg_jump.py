@@ -124,7 +124,12 @@ def analyse_limb(
         pk_val, _ = peak_force(contact_fz)
         r.peak_force_N          = pk_val
         r.peak_force_bw         = pk_val / bw_n if bw_n > 0 else np.nan
-        r.propulsion_impulse_Ns = impulse(contact_fz, rate_f)
+        # NET impulse (Fz − body weight) over the take-off contact = m·v at
+        # take-off, which is what sets jump height. Gross impulse rewards a
+        # slow, drawn-out push-off (more time × body weight) and can read
+        # "symmetric" while jump height is not.
+        r.propulsion_impulse_Ns = impulse(contact_fz - bw_n, rate_f) if bw_n > 0 \
+                                  else impulse(contact_fz, rate_f)
         r.rfd_100ms             = rfd(contact_fz, rate_f, window_ms=100.0)
 
     # ── Kinematics ────────────────────────────────────────────────────────────
