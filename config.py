@@ -42,10 +42,12 @@ SURGERY_DATE   = ""               # ISO "YYYY-MM-DD", or US "MM/YY", "MM/YYYY",
 # ─────────────────────────────────────────────────────────────────────────────
 
 # AMTI force plate analog sample rate (Hz) — used for Forces and COFP files
-ANALOG_RATE = 1000
+ANALOG_RATE = 900    # was 1000 — wrong: force frames are exactly 3x kinematic
+                     # frames and the 30 s endurance trial is 27,000 frames → 900 Hz
 
 # Kinematic / marker data rate from QTM/V3D (Hz) — used for Joints and Moments
-KINEMATIC_RATE = 200
+KINEMATIC_RATE = 300 # was 200 — wrong (see ANALOG_RATE); pelvis free-fall in DJ
+                     # flight independently gives ~280-300 Hz
 
 
 # ─────────────────────────────────────────────────────────────────────────────

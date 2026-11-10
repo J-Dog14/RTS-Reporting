@@ -31,7 +31,11 @@ PROFILE = ReportProfile(
     menu_blurb="ACL reconstruction and other knee surgery — valgus, tibial rotation, quad emphasis",
     report_subtitle="Return to Sport Assessment",
     file_tag="",
-    rtr_weights=dict(_ACL_WEIGHTS),
+    rtr_weights={**_ACL_WEIGHTS,
+                 # v14 additions
+                 "cop_velocity_airex_lsi": ("cop_velocity_lsi", 0.05),   # Airex balance
+                 "sl_power_lsi":           ("sl_jump_height_lsi", 0.06), # SL peak power W/kg
+                 },
     time_points=list(_ACL_TIME),
     time_note=_time_note,
     flag_knee_frontal=True,
@@ -82,6 +86,8 @@ PROFILE = ReportProfile(
         "max_vertical": {
             "intro":   "Bilateral CMJ — sensitive to subtle propulsion deficits masked at lower intensities.",
             "pk_low":  "quad/hip extensor deficit; strength work required",
+            "knee_work_gap": "The surgical knee contributes less push-off work while the hip makes up the "
+                             "difference — a hip-dominant strategy offloading the quadriceps.",
             "targets": "Targets: ≥ 90% propulsion, ≥ 90% peak force, matched unweighting impulse.",
             "cap_grf":    "Full CMJ: unweighting → eccentric load → propulsion → flight. Propulsive peaks should be symmetric.",
             "cap_flex":   "Knee flexion depth. Asymmetric countermovement depth = compensatory loading strategy.",
@@ -118,6 +124,8 @@ PROFILE = ReportProfile(
         "single_leg_jump": {
             "intro":   "Highest-demand test — isolates each limb, removing bilateral compensation. Strongest re-injury risk predictor.",
             "pk_low":  "Force deficit on surgical side — prioritise quad/hip extensor strengthening.",
+            "knee_work_gap": "The surgical knee does less push-off work while the hip makes up the difference "
+                             "— quadriceps avoidance under single-leg load.",
             "targets": f"<b>Targets:</b> Jump height LSI ≥ 90% · Peak GRF LSI ≥ 90% · Valgus {VALGUS_TARGET} · Tibial IR < 10° on surgical limb.",
             "cap_grf":    "Per-limb GRF (separate trials). Propulsive peak height and shape should match.",
             "cap_flex":   "Knee flexion per limb. Reduced surgical depth = power deficit or guarded strategy.",

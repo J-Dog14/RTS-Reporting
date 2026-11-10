@@ -59,6 +59,14 @@ class ReportProfile:
     # Extra manual-entry tests (beyond Triple Hop, which every profile gets)
     manual_tests:    List[ManualTest] = field(default_factory=list)
 
+    # Layout ------------------------------------------------------------------
+    section_order:   Optional[List[str]] = None   # test page order (keys: drop_jump, drop_landing,
+                                                  # max_vertical, endurance_squat, single_leg_jump,
+                                                  # proprioception); None = default order
+    extra_pages:     List[str] = field(default_factory=list)   # e.g. ["calf_ankle"]
+    domain_map:      Optional[Callable[[str, str], Optional[str]]] = None  # (LSI label, default domain) → radar domain
+    chart_exclude:   List[str] = field(default_factory=list)   # substrings hidden from the summary LSI chart
+
     # Text ------------------------------------------------------------------
     # text[test_key][field] -> str.  test_key in:
     #   drop_jump, drop_landing, max_vertical, endurance_squat,

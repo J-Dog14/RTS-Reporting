@@ -126,8 +126,12 @@ def _collect_session_info(folder: Path) -> dict:
 
     for txt_file in txt_files:
         try:
-            exp = parse_v3d_file(str(txt_file), rate=ANALOG_RATE, silent=True)
-            for path in exp.trial_paths():
+            # Only the first header row (one C3D path per column) is needed —
+            # reading just that line keeps this fast on 10+ MB v14 exports.
+            with open(txt_file, "r", encoding="utf-8", errors="replace") as fh:
+                first = fh.readline().rstrip("\r\n").split("\t")
+            trial_paths = [p for p in dict.fromkeys(x.strip() for x in first) if p]
+            for path in trial_paths:
                 info = _parse_c3d_path(path)
                 if info.get("display_name"):
                     name_display_counts[info["display_name"]] += 1
@@ -959,10 +963,17 @@ def run(session_folder: str,
         print(f"[main] ERROR: Session folder not found: {folder}")
         sys.exit(1)
 
+    from rts14.pipeline import is_v14_folder
+    IS_V14 = is_v14_folder(folder)
+    if IS_V14:
+        print("[main] v14 export folder detected (Force_Data.txt / Joint_Data.txt)")
+
     # ── Load general data (body weight) ──────────────────────────────────────
     general = _load(folder, "general_data", rate=ANALOG_RATE)
     bw_n    = general.scalar(SCALAR_SIGNAL_NAMES["patient_mass_n"])
-    if np.isnan(bw_n) or bw_n <= 0:
+    if IS_V14:
+        bw_n = 750.0            # placeholder — replaced by the plate-measured value
+    elif np.isnan(bw_n) or bw_n <= 0:
         print("[main] WARNING: MASS_N not found — defaulting to 750 N.")
         bw_n = 750.0
 
@@ -1051,6 +1062,15 @@ def run(session_folder: str,
     except ValueError:
         test_date_long = datetime.date.today().strftime("%B %d, %Y")
 
+    # Months post-op measured to the TEST date (not the day the report runs)
+    try:
+        _test_day = datetime.datetime.strptime(date_str_short, "%m-%d-%y").date()
+        _m = _months_since(surgery_date_str, reference=_test_day)
+        if _m is not None:
+            months_post_op = _m
+    except ValueError:
+        pass
+
     # ── Output folder: patient's original data folder if it exists ────────────
     raw_save_dir = session_info.get("save_dir")
     if raw_save_dir and Path(raw_save_dir).exists():
@@ -1068,7 +1088,8 @@ def run(session_folder: str,
     print(f"  Date     : {test_date_long}")
     print(f"  Surg side: {side}")
     print(f"  Report   : {profile.menu_label}")
-    print(f"  Body wt  : {bw_n:.1f} N  ({bw_n/9.81:.1f} kg)")
+    if not IS_V14:   # v14: measured from the force plates below
+        print(f"  Body wt  : {bw_n:.1f} N  ({bw_n/9.81:.1f} kg)")
     print(f"  Saving to: {out_folder}")
     print(f"{'='*62}\n")
 
@@ -1092,458 +1113,476 @@ def run(session_folder: str,
     test_results = {}
     all_signals  = {}   # raw arrays keyed by test name, for figure generation
 
-    # ── Drop Jump ─────────────────────────────────────────────────────────────
-    print("[main] -- Drop Jump ------------------------------")
-    dj_data   = _load(folder, "drop_jump_data",   rate=ANALOG_RATE)
-    dj_forces = _load(folder, "drop_jump_forces",  rate=ANALOG_RATE)
-    dj_joints = _load(folder, "drop_jump_joints",  rate=KINEMATIC_RATE)
-    sc        = _scalars(dj_data)
-
-    fz_s, fz_ns = _bilateral_forces(dj_forces, side)
-    if fz_s is not None and fz_ns is not None:
-        knee_surg_dj = _get_knee(dj_joints, side)
-        knee_ns_dj   = _get_knee(dj_joints, ns)
-        hip_surg_dj  = _get_hip(dj_joints, side)
-        hip_ns_dj    = _get_hip(dj_joints, ns)
-
-        res = dj_mod.analyse(
-            fz_surg=fz_s, fz_ns=fz_ns,
-            rate_f=ANALOG_RATE, bw_n=bw_n, surg_side=side,
-            knee_surg=knee_surg_dj,
-            knee_ns=knee_ns_dj,
-            hip_surg=hip_surg_dj,
-            hip_ns=hip_ns_dj,
-            rate_k=KINEMATIC_RATE, scalars=sc,
-        )
-        # Prefer V3D-computed jump height / contact time over time-series
-        # estimates (the averaged force trace blurs flight time).
-        #
-        # JH_IN is INCHES (it matches JT via h = g·t²/8). The report shows
-        # jump height in inches; `jump_height_cm` is a legacy field name.
-        # RSI is recomputed here in m/s from the same JH_IN and CT, because
-        # V3D's own RSI scalar does not match JH_IN ÷ CT (it came out ~2×
-        # too high, e.g. 2.63 with a 0.47 s contact) and was then scored as
-        # a top "strength".
-        jh_in = sc.get("JH_IN", np.nan)
-        if not np.isnan(jh_in):
-            res.jump_height_cm = float(jh_in) * JUMP_HEIGHT_SCALE
-        elif not np.isnan(res.jump_height_cm):
-            res.jump_height_cm = res.jump_height_cm / 2.54      # cm → in
-            jh_in = res.jump_height_cm
-        if not np.isnan(sc.get("CT", np.nan)):
-            res.contact_time_s = float(sc["CT"])
-        if not np.isnan(jh_in) and res.contact_time_s == res.contact_time_s \
-                and res.contact_time_s > 0:
-            res.rsi = (float(jh_in) * 0.0254) / res.contact_time_s
-        v3d_rsi = sc.get("RSI", np.nan)
-        if not np.isnan(v3d_rsi) and res.rsi == res.rsi and \
-                abs(v3d_rsi - res.rsi) > 0.15 * max(res.rsi, 1e-6):
-            print(f"  NOTE: V3D RSI scalar ({v3d_rsi:.3f}) ≠ JH/CT ({res.rsi:.3f} m/s) — "
-                  f"report uses JH/CT.")
-
-        test_results["drop_jump"] = res
-        dj_cofp    = _load(folder, "drop_jump_cofp",    rate=ANALOG_RATE)
-        dj_moments = _load(folder, "drop_jump_moments", rate=KINEMATIC_RATE)
-        ankle_surg_dj  = _get_ankle(dj_joints, side)
-        ankle_ns_dj    = _get_ankle(dj_joints, ns)
-        all_signals["drop_jump"] = {
-            "fz_surg":           fz_s,
-            "fz_ns":             fz_ns,
-            "knee_flex_surg":    knee_surg_dj.get("flex_ext"),
-            "knee_flex_ns":      knee_ns_dj.get("flex_ext"),
-            "knee_valgus_surg":  knee_surg_dj.get("valgus"),
-            "knee_valgus_ns":    knee_ns_dj.get("valgus"),
-            "tib_rot_surg":      knee_surg_dj.get("tib_rot"),
-            "tib_rot_ns":        knee_ns_dj.get("tib_rot"),
-            "ankle_flex_surg":   ankle_surg_dj.get("flex_ext"),
-            "ankle_flex_ns":     ankle_ns_dj.get("flex_ext"),
-            "hip_add_surg":      hip_surg_dj.get("ab_adduction"),
-            "hip_add_ns":        hip_ns_dj.get("ab_adduction"),
-            "hip_ir_surg":       hip_surg_dj.get("int_ext_rot"),
-            "hip_ir_ns":         hip_ns_dj.get("int_ext_rot"),
-            "cop_y_surg":        _cofp_mm(dj_cofp, _surg_plate(side), "Y"),
-            "cop_y_ns":          _cofp_mm(dj_cofp, _ns_plate(side),   "Y"),
-            "knee_moment_surg":  _peak_knee_moment(dj_moments, side),
-            "knee_moment_ns":    _peak_knee_moment(dj_moments, ns),
-            "ankle_moment_surg": _peak_ankle_moment(dj_moments, side),
-            "ankle_moment_ns":   _peak_ankle_moment(dj_moments, ns),
-        }
-        print(f"  RSI           = {res.rsi:.3f} m/s")
-        print(f"  Jump height   = {res.jump_height_cm:.2f} in")
-        print(f"  Contact time  = {res.contact_time_s:.3f} s")
-        print(f"  Landing LSI   = {res.landing_lsi_200ms:.1f}%")
-        print(f"  Load rate LSI = {res.loading_rate_lsi:.1f}%")
+    # ── v14 exports (Visual3D "model + export only") ──────────────────────────
+    # Everything is computed per trial in rts14/ and averaged across trials.
+    if IS_V14:
+        from rts14.pipeline import build_results as _build_v14
+        print("[main] -- v14 exports: per-trial analysis -------")
+        test_results, all_signals, v14_info = _build_v14(str(folder), side)
+        bw_n = v14_info["mass_n"]
+        patient_data["bw_kg"] = bw_n / 9.81
+        if v14_info.get("rates"):
+            patient_data["rate_grf"], patient_data["rate_kin"] = v14_info["rates"]
+        patient_data["report_notes"] = [n for n in [v14_info.get("bw_warning")] if n]
+        for k, names in v14_info["trials"].items():
+            print(f"  {k:<16}: {', '.join(names)}")
+        print(f"  Body weight     : {bw_n:.1f} N (from force plates)")
+        if v14_info.get("bw_warning"):
+            print(f"  WARNING: {v14_info['bw_warning']}")
+        print()
     else:
-        print("  [SKIPPED] Forces file missing or empty.")
-    print()
+        # ── Drop Jump ─────────────────────────────────────────────────────────────
+        print("[main] -- Drop Jump ------------------------------")
+        dj_data   = _load(folder, "drop_jump_data",   rate=ANALOG_RATE)
+        dj_forces = _load(folder, "drop_jump_forces",  rate=ANALOG_RATE)
+        dj_joints = _load(folder, "drop_jump_joints",  rate=KINEMATIC_RATE)
+        sc        = _scalars(dj_data)
 
-    # ── Drop Landing ──────────────────────────────────────────────────────────
-    print("[main] -- Drop Landing ---------------------------")
-    dl_data   = _load(folder, "drop_landing_data",   rate=ANALOG_RATE)
-    dl_forces = _load(folder, "drop_landing_forces",  rate=ANALOG_RATE)
-    dl_joints = _load(folder, "drop_landing_joints",  rate=KINEMATIC_RATE)
-    sc        = _scalars(dl_data)
+        fz_s, fz_ns = _bilateral_forces(dj_forces, side)
+        if fz_s is not None and fz_ns is not None:
+            knee_surg_dj = _get_knee(dj_joints, side)
+            knee_ns_dj   = _get_knee(dj_joints, ns)
+            hip_surg_dj  = _get_hip(dj_joints, side)
+            hip_ns_dj    = _get_hip(dj_joints, ns)
 
-    fz_s, fz_ns = _bilateral_forces(dl_forces, side)
-    if fz_s is not None and fz_ns is not None:
-        knee_surg_dl = _get_knee(dl_joints, side)
-        knee_ns_dl   = _get_knee(dl_joints, ns)
-        hip_surg_dl  = _get_hip(dl_joints, side)
-        hip_ns_dl    = _get_hip(dl_joints, ns)
-
-        res = dl_mod.analyse(
-            fz_surg=fz_s, fz_ns=fz_ns,
-            rate_f=ANALOG_RATE, bw_n=bw_n, surg_side=side,
-            knee_surg=knee_surg_dl,
-            knee_ns=knee_ns_dl,
-            hip_surg=hip_surg_dl,
-            hip_ns=hip_ns_dl,
-            rate_k=KINEMATIC_RATE, scalars=sc,
-        )
-        test_results["drop_landing"] = res
-        dl_cofp    = _load(folder, "drop_landing_cofp",    rate=ANALOG_RATE)
-        dl_moments = _load(folder, "drop_landing_moments", rate=KINEMATIC_RATE)
-        ankle_surg_dl  = _get_ankle(dl_joints, side)
-        ankle_ns_dl    = _get_ankle(dl_joints, ns)
-        all_signals["drop_landing"] = {
-            "fz_surg":           fz_s,
-            "fz_ns":             fz_ns,
-            "knee_flex_surg":    knee_surg_dl.get("flex_ext"),
-            "knee_flex_ns":      knee_ns_dl.get("flex_ext"),
-            "knee_valgus_surg":  knee_surg_dl.get("valgus"),
-            "knee_valgus_ns":    knee_ns_dl.get("valgus"),
-            "tib_rot_surg":      knee_surg_dl.get("tib_rot"),
-            "tib_rot_ns":        knee_ns_dl.get("tib_rot"),
-            "ankle_flex_surg":   ankle_surg_dl.get("flex_ext"),
-            "ankle_flex_ns":     ankle_ns_dl.get("flex_ext"),
-            "hip_add_surg":      hip_surg_dl.get("ab_adduction"),
-            "hip_add_ns":        hip_ns_dl.get("ab_adduction"),
-            "hip_ir_surg":       hip_surg_dl.get("int_ext_rot"),
-            "hip_ir_ns":         hip_ns_dl.get("int_ext_rot"),
-            "cop_y_surg":        _cofp_mm(dl_cofp, _surg_plate(side), "Y"),
-            "cop_y_ns":          _cofp_mm(dl_cofp, _ns_plate(side),   "Y"),
-            "knee_moment_surg":  _peak_knee_moment(dl_moments, side),
-            "knee_moment_ns":    _peak_knee_moment(dl_moments, ns),
-            "ankle_moment_surg": _peak_ankle_moment(dl_moments, side),
-            "ankle_moment_ns":   _peak_ankle_moment(dl_moments, ns),
-        }
-        print(f"  Impact LSI    = {res.impact_transient_lsi:.1f}%")
-        print(f"  Load rate LSI = {res.loading_rate_lsi:.1f}%")
-        print(f"  Peak force LSI= {res.peak_force_lsi:.1f}%")
-    else:
-        print("  [SKIPPED] Forces file missing or empty.")
-    print()
-
-    # ── Max Vertical Jump ─────────────────────────────────────────────────────
-    print("[main] -- Max Vertical Jump ----------------------")
-    mv_data   = _load(folder, "vertical_data",   rate=ANALOG_RATE)
-    mv_forces = _load(folder, "vertical_forces",  rate=ANALOG_RATE)
-    mv_joints = _load(folder, "vertical_joints",  rate=KINEMATIC_RATE)
-    sc        = _scalars(mv_data)
-
-    fz_s, fz_ns = _bilateral_forces(mv_forces, side)
-    if fz_s is not None and fz_ns is not None:
-        knee_surg_mv = _get_knee(mv_joints, side)
-        knee_ns_mv   = _get_knee(mv_joints, ns)
-        hip_surg_mv  = _get_hip(mv_joints, side)
-        hip_ns_mv    = _get_hip(mv_joints, ns)
-
-        res = mv_mod.analyse(
-            fz_surg=fz_s, fz_ns=fz_ns,
-            rate_f=ANALOG_RATE, bw_n=bw_n, surg_side=side,
-            knee_surg=knee_surg_mv,
-            knee_ns=knee_ns_mv,
-            hip_surg=hip_surg_mv,
-            hip_ns=hip_ns_mv,
-            rate_k=KINEMATIC_RATE, scalars=sc,
-        )
-        # Apply V3D scalars
-        if not np.isnan(sc.get("JH_IN", np.nan)):
-            res.jump_height_cm = float(sc["JH_IN"]) * JUMP_HEIGHT_SCALE
-
-        # Peak force LSI from "Force Left"/"Force Right" scalars
-        fl = sc.get("Force Left",  np.nan)
-        fr = sc.get("Force Right", np.nan)
-        if not (np.isnan(fl) or np.isnan(fr)):
-            pk_surg = fr if side == "R" else fl
-            pk_ns   = fl if side == "R" else fr
-            from helpers.grf import lsi as _lsi
-            res.peak_force_surg_N = pk_surg
-            res.peak_force_ns_N   = pk_ns
-            res.peak_force_lsi    = _lsi(pk_surg, pk_ns)
-
-        test_results["max_vertical"] = res
-        mv_cofp    = _load(folder, "vertical_cofp",    rate=ANALOG_RATE)
-        mv_moments = _load(folder, "vertical_moments", rate=KINEMATIC_RATE)
-        ankle_surg_mv  = _get_ankle(mv_joints, side)
-        ankle_ns_mv    = _get_ankle(mv_joints, ns)
-        all_signals["max_vertical"] = {
-            "fz_surg":           fz_s,
-            "fz_ns":             fz_ns,
-            "knee_flex_surg":    knee_surg_mv.get("flex_ext"),
-            "knee_flex_ns":      knee_ns_mv.get("flex_ext"),
-            "knee_valgus_surg":  knee_surg_mv.get("valgus"),
-            "knee_valgus_ns":    knee_ns_mv.get("valgus"),
-            "tib_rot_surg":      knee_surg_mv.get("tib_rot"),
-            "tib_rot_ns":        knee_ns_mv.get("tib_rot"),
-            "ankle_flex_surg":   ankle_surg_mv.get("flex_ext"),
-            "ankle_flex_ns":     ankle_ns_mv.get("flex_ext"),
-            "hip_add_surg":      hip_surg_mv.get("ab_adduction"),
-            "hip_add_ns":        hip_ns_mv.get("ab_adduction"),
-            "hip_ir_surg":       hip_surg_mv.get("int_ext_rot"),
-            "hip_ir_ns":         hip_ns_mv.get("int_ext_rot"),
-            "cop_y_surg":        _cofp_mm(mv_cofp, _surg_plate(side), "Y"),
-            "cop_y_ns":          _cofp_mm(mv_cofp, _ns_plate(side),   "Y"),
-            "knee_moment_surg":  _peak_knee_moment(mv_moments, side),
-            "knee_moment_ns":    _peak_knee_moment(mv_moments, ns),
-            "ankle_moment_surg": _peak_ankle_moment(mv_moments, side),
-            "ankle_moment_ns":   _peak_ankle_moment(mv_moments, ns),
-        }
-        print(f"  Jump height   = {res.jump_height_cm:.2f} (V3D units)")
-        print(f"  Propulsion LSI= {res.propulsion_lsi:.1f}%")
-        print(f"  Peak force LSI= {res.peak_force_lsi:.1f}%")
-    else:
-        print("  [SKIPPED] Forces file missing or empty.")
-    print()
-
-    # ── Endurance Squat ───────────────────────────────────────────────────────
-    print("[main] -- Endurance Squat ------------------------")
-    es_forces = _load(folder, "endurance_forces", rate=ANALOG_RATE, verbose=True)
-    es_joints = _load(folder, "endurance_joints", rate=KINEMATIC_RATE, verbose=True)
-
-    fz_s, fz_ns = _bilateral_forces(es_forces, side)
-    if fz_s is None or fz_ns is None:
-        sp  = _surg_plate(side)
-        nsp = _ns_plate(side)
-        sigs = es_forces.available_signals()
-        if sigs:
-            print(f"  [DIAG] Forces file loaded but FP signals not found.")
-            print(f"  [DIAG] Looking for '{sp}'/'{nsp}' (Z). File has: {sigs}")
-        else:
-            print(f"  [DIAG] Forces file not found or empty.")
-            print(f"  [DIAG] Expected: '{EXPORT_FILES.get('endurance_forces')}'")
-            txt_files = sorted(f.name for f in folder.glob("*ndur*") or folder.glob("*squat*"))
-            if not txt_files:
-                txt_files = sorted(f.name for f in folder.glob("*.txt") if "ndur" in f.name.lower() or "squat" in f.name.lower())
-            if txt_files:
-                print(f"  [DIAG] Files with 'endur'/'squat' in name: {txt_files}")
-    if fz_s is not None and fz_ns is not None:
-        k_surg = _get_knee(es_joints, side)
-        k_ns   = _get_knee(es_joints, ns)
-        res = es_mod.analyse(
-            fz_surg=fz_s, fz_ns=fz_ns,
-            rate_f=ANALOG_RATE, bw_n=bw_n, surg_side=side,
-            knee_valgus_surg=k_surg.get("valgus"),
-            knee_valgus_ns=k_ns.get("valgus"),
-            rate_k=KINEMATIC_RATE,
-        )
-        test_results["endurance_squat"] = res
-        es_cofp    = _load(folder, "endurance_cofp",    rate=ANALOG_RATE)
-        es_moments = _load(folder, "endurance_moments", rate=KINEMATIC_RATE)
-        all_signals["endurance_squat"] = {
-            "fz_surg":          fz_s,
-            "fz_ns":            fz_ns,
-            "cop_y_surg":       _cofp_mm(es_cofp, _surg_plate(side), "Y"),
-            "cop_y_ns":         _cofp_mm(es_cofp, _ns_plate(side),   "Y"),
-            "knee_moment_surg": _peak_knee_moment(es_moments, side),
-            "knee_moment_ns":   _peak_knee_moment(es_moments, ns),
-        }
-        print(f"  Reps detected = {res.n_cycles}")
-        print(f"  Mean LSI      = {res.mean_lsi_peak:.1f}%")
-        print(f"  Fatigue drift = {res.fatigue_drift_pct:.1f}%")
-    else:
-        print("  [SKIPPED] Forces file missing or empty.")
-    print()
-
-    # ── Single-Leg Vertical Jump ──────────────────────────────────────────────
-    print("[main] -- Single-Leg Vertical Jump ---------------")
-    sl_l_data   = _load(folder, "sl_left_data",    rate=ANALOG_RATE)
-    sl_l_forces = _load(folder, "sl_left_forces",  rate=ANALOG_RATE)
-    sl_l_joints = _load(folder, "sl_left_joints",  rate=KINEMATIC_RATE)
-    sl_r_data   = _load(folder, "sl_right_data",   rate=ANALOG_RATE)
-    sl_r_forces = _load(folder, "sl_right_forces", rate=ANALOG_RATE)
-    sl_r_joints = _load(folder, "sl_right_joints", rate=KINEMATIC_RATE)
-
-    fz_left  = sl_l_forces.timeseries("FP3", "Z")
-    fz_right = sl_r_forces.timeseries("FP3", "Z")
-
-    jh_l = sl_l_data.scalar(SCALAR_SIGNAL_NAMES["jump_height_l"])
-    jh_r = sl_r_data.scalar(SCALAR_SIGNAL_NAMES["jump_height_r"])
-    if not np.isnan(jh_l): jh_l *= JUMP_HEIGHT_SCALE
-    if not np.isnan(jh_r): jh_r *= JUMP_HEIGHT_SCALE
-
-    if fz_left is not None or fz_right is not None:
-        if side == "L":
-            fz_surg_sl, fz_ns_sl = fz_left,  fz_right
-            jh_surg,    jh_ns    = jh_l,      jh_r
-            knee_surg_sl = _get_knee(sl_l_joints, "L")
-            knee_ns_sl   = _get_knee(sl_r_joints, "R")
-        else:
-            fz_surg_sl, fz_ns_sl = fz_right, fz_left
-            jh_surg,    jh_ns    = jh_r,     jh_l
-            knee_surg_sl = _get_knee(sl_r_joints, "R")
-            knee_ns_sl   = _get_knee(sl_l_joints, "L")
-
-        surg_limb = sl_mod.analyse_limb(
-            fz=fz_surg_sl, rate_f=ANALOG_RATE, bw_n=bw_n,
-            side="Surgical",     jump_height_scalar=jh_surg,
-            knee_data=knee_surg_sl, rate_k=KINEMATIC_RATE,
-        )
-        ns_limb = sl_mod.analyse_limb(
-            fz=fz_ns_sl,   rate_f=ANALOG_RATE, bw_n=bw_n,
-            side="Non-Surgical", jump_height_scalar=jh_ns,
-            knee_data=knee_ns_sl,   rate_k=KINEMATIC_RATE,
-        )
-        res = sl_mod.combine(surg_limb, ns_limb)
-        test_results["single_leg_jump"] = res
-        # Load per-side COFP and moments (side-specific files for single-leg tests)
-        sl_surg_cofp_key = "sl_left_cofp"  if side == "L" else "sl_right_cofp"
-        sl_ns_cofp_key   = "sl_right_cofp" if side == "L" else "sl_left_cofp"
-        sl_surg_mom_key  = "sl_left_moments"  if side == "L" else "sl_right_moments"
-        sl_ns_mom_key    = "sl_right_moments" if side == "L" else "sl_left_moments"
-        sl_surg_cofp = _load(folder, sl_surg_cofp_key, rate=ANALOG_RATE)
-        sl_ns_cofp   = _load(folder, sl_ns_cofp_key,   rate=ANALOG_RATE)
-        sl_surg_mom  = _load(folder, sl_surg_mom_key,  rate=KINEMATIC_RATE)
-        sl_ns_mom    = _load(folder, sl_ns_mom_key,    rate=KINEMATIC_RATE)
-        # Per-side ankle (joints loaded from SLVL/SLVR files)
-        sl_surg_joints = sl_l_joints if side == "L" else sl_r_joints
-        sl_ns_joints   = sl_r_joints if side == "L" else sl_l_joints
-        ankle_surg_sl  = _get_ankle(sl_surg_joints, side)
-        ankle_ns_sl    = _get_ankle(sl_ns_joints,   ns)
-        hip_surg_sl    = _get_hip(sl_surg_joints, side)
-        hip_ns_sl      = _get_hip(sl_ns_joints,   ns)
-        all_signals["single_leg_jump"] = {
-            "fz_surg":           fz_surg_sl,
-            "fz_ns":             fz_ns_sl,
-            "knee_flex_surg":    knee_surg_sl.get("flex_ext"),
-            "knee_flex_ns":      knee_ns_sl.get("flex_ext"),
-            "knee_valgus_surg":  knee_surg_sl.get("valgus"),
-            "knee_valgus_ns":    knee_ns_sl.get("valgus"),
-            "tib_rot_surg":      knee_surg_sl.get("tib_rot"),
-            "tib_rot_ns":        knee_ns_sl.get("tib_rot"),
-            "ankle_flex_surg":   ankle_surg_sl.get("flex_ext"),
-            "ankle_flex_ns":     ankle_ns_sl.get("flex_ext"),
-            "hip_add_surg":      hip_surg_sl.get("ab_adduction"),
-            "hip_add_ns":        hip_ns_sl.get("ab_adduction"),
-            "hip_ir_surg":       hip_surg_sl.get("int_ext_rot"),
-            "hip_ir_ns":         hip_ns_sl.get("int_ext_rot"),
-            "cop_y_surg":        _cofp_mm(sl_surg_cofp, "FP3", "Y"),
-            "cop_y_ns":          _cofp_mm(sl_ns_cofp,   "FP3", "Y"),
-            "knee_moment_surg":  _peak_knee_moment(sl_surg_mom, side),
-            "knee_moment_ns":    _peak_knee_moment(sl_ns_mom,   ns),
-            "ankle_moment_surg": _peak_ankle_moment(sl_surg_mom, side),
-            "ankle_moment_ns":   _peak_ankle_moment(sl_ns_mom,   ns),
-        }
-        print(f"  Surg jump ht = {res.surgical.jump_height_cm:.2f} (V3D units)")
-        print(f"  NS   jump ht = {res.non_surgical.jump_height_cm:.2f} (V3D units)")
-        print(f"  Jump ht LSI  = {res.lsi_jump_height:.1f}%")
-        print(f"  Peak force LSI={res.lsi_peak_force:.1f}%")
-    else:
-        print("  [SKIPPED] Forces files missing or empty.")
-    print()
-
-    # ── Proprioception ────────────────────────────────────────────────────────
-    print("[main] -- Proprioception -------------------------")
-    #  PCTL1 / PCTR1 = Standard (flat firm ground)
-    #  PCTL2 / PCTR2 = Airex bag (unstable foam — harder, higher COP expected)
-    pctl1 = _load(folder, "pctl1_cofp", rate=ANALOG_RATE, verbose=True)
-    pctl2 = _load(folder, "pctl2_cofp", rate=ANALOG_RATE, verbose=True)
-    pctr1 = _load(folder, "pctr1_cofp", rate=ANALOG_RATE, verbose=True)
-    pctr2 = _load(folder, "pctr2_cofp", rate=ANALOG_RATE, verbose=True)
-
-    def _cop(exp, comp):
-        return _cofp_mm(exp, "FP3", comp)
-
-    # Standard (trial 1 per side)
-    if side == "L":
-        std_xs, std_ys = _cop(pctl1, "X"), _cop(pctl1, "Y")
-        std_xn, std_yn = _cop(pctr1, "X"), _cop(pctr1, "Y")
-        airex_xs, airex_ys = _cop(pctl2, "X"), _cop(pctl2, "Y")
-        airex_xn, airex_yn = _cop(pctr2, "X"), _cop(pctr2, "Y")
-    else:
-        std_xs, std_ys = _cop(pctr1, "X"), _cop(pctr1, "Y")
-        std_xn, std_yn = _cop(pctl1, "X"), _cop(pctl1, "Y")
-        airex_xs, airex_ys = _cop(pctr2, "X"), _cop(pctr2, "Y")
-        airex_xn, airex_yn = _cop(pctl2, "X"), _cop(pctl2, "Y")
-
-    # Stance-plate Fz — lets the analysis drop frames where the other foot
-    # touched down off-plate or the athlete stepped on / off.
-    def _fz(key):
-        return _load(folder, key, rate=ANALOG_RATE).timeseries("FP3", "Z")
-    if side == "L":
-        prop_fz = {"surg_std": _fz("pctl1_forces"), "ns_std": _fz("pctr1_forces"),
-                   "surg_airex": _fz("pctl2_forces"), "ns_airex": _fz("pctr2_forces")}
-    else:
-        prop_fz = {"surg_std": _fz("pctr1_forces"), "ns_std": _fz("pctl1_forces"),
-                   "surg_airex": _fz("pctr2_forces"), "ns_airex": _fz("pctl2_forces")}
-
-    from config import PROP_TRIM_SECONDS
-    has_prop = any(a is not None for a in [std_xs, std_xn, airex_xs, airex_xn])
-    if has_prop:
-        try:
-            res = prop_mod.analyse(
-                cop_x_surg_std=std_xs,   cop_y_surg_std=std_ys,
-                cop_x_ns_std=std_xn,     cop_y_ns_std=std_yn,
-                cop_x_surg_airex=airex_xs, cop_y_surg_airex=airex_ys,
-                cop_x_ns_airex=airex_xn,   cop_y_ns_airex=airex_yn,
-                rate_f=ANALOG_RATE,
-                surg_side=side,
-                trim_seconds=PROP_TRIM_SECONDS,
-                fz=prop_fz,
+            res = dj_mod.analyse(
+                fz_surg=fz_s, fz_ns=fz_ns,
+                rate_f=ANALOG_RATE, bw_n=bw_n, surg_side=side,
+                knee_surg=knee_surg_dj,
+                knee_ns=knee_ns_dj,
+                hip_surg=hip_surg_dj,
+                hip_ns=hip_ns_dj,
+                rate_k=KINEMATIC_RATE, scalars=sc,
             )
-            test_results["proprioception"] = res
+            # Prefer V3D-computed jump height / contact time over time-series
+            # estimates (the averaged force trace blurs flight time).
+            #
+            # JH_IN is INCHES (it matches JT via h = g·t²/8). The report shows
+            # jump height in inches; `jump_height_cm` is a legacy field name.
+            # RSI is recomputed here in m/s from the same JH_IN and CT, because
+            # V3D's own RSI scalar does not match JH_IN ÷ CT (it came out ~2×
+            # too high, e.g. 2.63 with a 0.47 s contact) and was then scored as
+            # a top "strength".
+            jh_in = sc.get("JH_IN", np.nan)
+            if not np.isnan(jh_in):
+                res.jump_height_cm = float(jh_in) * JUMP_HEIGHT_SCALE
+            elif not np.isnan(res.jump_height_cm):
+                res.jump_height_cm = res.jump_height_cm / 2.54      # cm → in
+                jh_in = res.jump_height_cm
+            if not np.isnan(sc.get("CT", np.nan)):
+                res.contact_time_s = float(sc["CT"])
+            if not np.isnan(jh_in) and res.contact_time_s == res.contact_time_s \
+                    and res.contact_time_s > 0:
+                res.rsi = (float(jh_in) * 0.0254) / res.contact_time_s
+            v3d_rsi = sc.get("RSI", np.nan)
+            if not np.isnan(v3d_rsi) and res.rsi == res.rsi and \
+                    abs(v3d_rsi - res.rsi) > 0.15 * max(res.rsi, 1e-6):
+                print(f"  NOTE: V3D RSI scalar ({v3d_rsi:.3f}) ≠ JH/CT ({res.rsi:.3f} m/s) — "
+                      f"report uses JH/CT.")
 
-            # Pass both conditions' COP arrays to the report
-            def _limb_sigs(cond):
-                if cond is None:
-                    return {"cop_x_surg": None, "cop_y_surg": None,
-                            "cop_x_ns": None,   "cop_y_ns": None}
-                s = cond.surgical
-                n = cond.non_surgical
-                return {
-                    "cop_x_surg": s.cop_x if s else None,
-                    "cop_y_surg": s.cop_y if s else None,
-                    "cop_x_ns":   n.cop_x if n else None,
-                    "cop_y_ns":   n.cop_y if n else None,
+            test_results["drop_jump"] = res
+            dj_cofp    = _load(folder, "drop_jump_cofp",    rate=ANALOG_RATE)
+            dj_moments = _load(folder, "drop_jump_moments", rate=KINEMATIC_RATE)
+            ankle_surg_dj  = _get_ankle(dj_joints, side)
+            ankle_ns_dj    = _get_ankle(dj_joints, ns)
+            all_signals["drop_jump"] = {
+                "fz_surg":           fz_s,
+                "fz_ns":             fz_ns,
+                "knee_flex_surg":    knee_surg_dj.get("flex_ext"),
+                "knee_flex_ns":      knee_ns_dj.get("flex_ext"),
+                "knee_valgus_surg":  knee_surg_dj.get("valgus"),
+                "knee_valgus_ns":    knee_ns_dj.get("valgus"),
+                "tib_rot_surg":      knee_surg_dj.get("tib_rot"),
+                "tib_rot_ns":        knee_ns_dj.get("tib_rot"),
+                "ankle_flex_surg":   ankle_surg_dj.get("flex_ext"),
+                "ankle_flex_ns":     ankle_ns_dj.get("flex_ext"),
+                "hip_add_surg":      hip_surg_dj.get("ab_adduction"),
+                "hip_add_ns":        hip_ns_dj.get("ab_adduction"),
+                "hip_ir_surg":       hip_surg_dj.get("int_ext_rot"),
+                "hip_ir_ns":         hip_ns_dj.get("int_ext_rot"),
+                "cop_y_surg":        _cofp_mm(dj_cofp, _surg_plate(side), "Y"),
+                "cop_y_ns":          _cofp_mm(dj_cofp, _ns_plate(side),   "Y"),
+                "knee_moment_surg":  _peak_knee_moment(dj_moments, side),
+                "knee_moment_ns":    _peak_knee_moment(dj_moments, ns),
+                "ankle_moment_surg": _peak_ankle_moment(dj_moments, side),
+                "ankle_moment_ns":   _peak_ankle_moment(dj_moments, ns),
+            }
+            print(f"  RSI           = {res.rsi:.3f} m/s")
+            print(f"  Jump height   = {res.jump_height_cm:.2f} in")
+            print(f"  Contact time  = {res.contact_time_s:.3f} s")
+            print(f"  Landing LSI   = {res.landing_lsi_200ms:.1f}%")
+            print(f"  Load rate LSI = {res.loading_rate_lsi:.1f}%")
+        else:
+            print("  [SKIPPED] Forces file missing or empty.")
+        print()
+
+        # ── Drop Landing ──────────────────────────────────────────────────────────
+        print("[main] -- Drop Landing ---------------------------")
+        dl_data   = _load(folder, "drop_landing_data",   rate=ANALOG_RATE)
+        dl_forces = _load(folder, "drop_landing_forces",  rate=ANALOG_RATE)
+        dl_joints = _load(folder, "drop_landing_joints",  rate=KINEMATIC_RATE)
+        sc        = _scalars(dl_data)
+
+        fz_s, fz_ns = _bilateral_forces(dl_forces, side)
+        if fz_s is not None and fz_ns is not None:
+            knee_surg_dl = _get_knee(dl_joints, side)
+            knee_ns_dl   = _get_knee(dl_joints, ns)
+            hip_surg_dl  = _get_hip(dl_joints, side)
+            hip_ns_dl    = _get_hip(dl_joints, ns)
+
+            res = dl_mod.analyse(
+                fz_surg=fz_s, fz_ns=fz_ns,
+                rate_f=ANALOG_RATE, bw_n=bw_n, surg_side=side,
+                knee_surg=knee_surg_dl,
+                knee_ns=knee_ns_dl,
+                hip_surg=hip_surg_dl,
+                hip_ns=hip_ns_dl,
+                rate_k=KINEMATIC_RATE, scalars=sc,
+            )
+            test_results["drop_landing"] = res
+            dl_cofp    = _load(folder, "drop_landing_cofp",    rate=ANALOG_RATE)
+            dl_moments = _load(folder, "drop_landing_moments", rate=KINEMATIC_RATE)
+            ankle_surg_dl  = _get_ankle(dl_joints, side)
+            ankle_ns_dl    = _get_ankle(dl_joints, ns)
+            all_signals["drop_landing"] = {
+                "fz_surg":           fz_s,
+                "fz_ns":             fz_ns,
+                "knee_flex_surg":    knee_surg_dl.get("flex_ext"),
+                "knee_flex_ns":      knee_ns_dl.get("flex_ext"),
+                "knee_valgus_surg":  knee_surg_dl.get("valgus"),
+                "knee_valgus_ns":    knee_ns_dl.get("valgus"),
+                "tib_rot_surg":      knee_surg_dl.get("tib_rot"),
+                "tib_rot_ns":        knee_ns_dl.get("tib_rot"),
+                "ankle_flex_surg":   ankle_surg_dl.get("flex_ext"),
+                "ankle_flex_ns":     ankle_ns_dl.get("flex_ext"),
+                "hip_add_surg":      hip_surg_dl.get("ab_adduction"),
+                "hip_add_ns":        hip_ns_dl.get("ab_adduction"),
+                "hip_ir_surg":       hip_surg_dl.get("int_ext_rot"),
+                "hip_ir_ns":         hip_ns_dl.get("int_ext_rot"),
+                "cop_y_surg":        _cofp_mm(dl_cofp, _surg_plate(side), "Y"),
+                "cop_y_ns":          _cofp_mm(dl_cofp, _ns_plate(side),   "Y"),
+                "knee_moment_surg":  _peak_knee_moment(dl_moments, side),
+                "knee_moment_ns":    _peak_knee_moment(dl_moments, ns),
+                "ankle_moment_surg": _peak_ankle_moment(dl_moments, side),
+                "ankle_moment_ns":   _peak_ankle_moment(dl_moments, ns),
+            }
+            print(f"  Impact LSI    = {res.impact_transient_lsi:.1f}%")
+            print(f"  Load rate LSI = {res.loading_rate_lsi:.1f}%")
+            print(f"  Peak force LSI= {res.peak_force_lsi:.1f}%")
+        else:
+            print("  [SKIPPED] Forces file missing or empty.")
+        print()
+
+        # ── Max Vertical Jump ─────────────────────────────────────────────────────
+        print("[main] -- Max Vertical Jump ----------------------")
+        mv_data   = _load(folder, "vertical_data",   rate=ANALOG_RATE)
+        mv_forces = _load(folder, "vertical_forces",  rate=ANALOG_RATE)
+        mv_joints = _load(folder, "vertical_joints",  rate=KINEMATIC_RATE)
+        sc        = _scalars(mv_data)
+
+        fz_s, fz_ns = _bilateral_forces(mv_forces, side)
+        if fz_s is not None and fz_ns is not None:
+            knee_surg_mv = _get_knee(mv_joints, side)
+            knee_ns_mv   = _get_knee(mv_joints, ns)
+            hip_surg_mv  = _get_hip(mv_joints, side)
+            hip_ns_mv    = _get_hip(mv_joints, ns)
+
+            res = mv_mod.analyse(
+                fz_surg=fz_s, fz_ns=fz_ns,
+                rate_f=ANALOG_RATE, bw_n=bw_n, surg_side=side,
+                knee_surg=knee_surg_mv,
+                knee_ns=knee_ns_mv,
+                hip_surg=hip_surg_mv,
+                hip_ns=hip_ns_mv,
+                rate_k=KINEMATIC_RATE, scalars=sc,
+            )
+            # Apply V3D scalars
+            if not np.isnan(sc.get("JH_IN", np.nan)):
+                res.jump_height_cm = float(sc["JH_IN"]) * JUMP_HEIGHT_SCALE
+
+            # Peak force LSI from "Force Left"/"Force Right" scalars
+            fl = sc.get("Force Left",  np.nan)
+            fr = sc.get("Force Right", np.nan)
+            if not (np.isnan(fl) or np.isnan(fr)):
+                pk_surg = fr if side == "R" else fl
+                pk_ns   = fl if side == "R" else fr
+                from helpers.grf import lsi as _lsi
+                res.peak_force_surg_N = pk_surg
+                res.peak_force_ns_N   = pk_ns
+                res.peak_force_lsi    = _lsi(pk_surg, pk_ns)
+
+            test_results["max_vertical"] = res
+            mv_cofp    = _load(folder, "vertical_cofp",    rate=ANALOG_RATE)
+            mv_moments = _load(folder, "vertical_moments", rate=KINEMATIC_RATE)
+            ankle_surg_mv  = _get_ankle(mv_joints, side)
+            ankle_ns_mv    = _get_ankle(mv_joints, ns)
+            all_signals["max_vertical"] = {
+                "fz_surg":           fz_s,
+                "fz_ns":             fz_ns,
+                "knee_flex_surg":    knee_surg_mv.get("flex_ext"),
+                "knee_flex_ns":      knee_ns_mv.get("flex_ext"),
+                "knee_valgus_surg":  knee_surg_mv.get("valgus"),
+                "knee_valgus_ns":    knee_ns_mv.get("valgus"),
+                "tib_rot_surg":      knee_surg_mv.get("tib_rot"),
+                "tib_rot_ns":        knee_ns_mv.get("tib_rot"),
+                "ankle_flex_surg":   ankle_surg_mv.get("flex_ext"),
+                "ankle_flex_ns":     ankle_ns_mv.get("flex_ext"),
+                "hip_add_surg":      hip_surg_mv.get("ab_adduction"),
+                "hip_add_ns":        hip_ns_mv.get("ab_adduction"),
+                "hip_ir_surg":       hip_surg_mv.get("int_ext_rot"),
+                "hip_ir_ns":         hip_ns_mv.get("int_ext_rot"),
+                "cop_y_surg":        _cofp_mm(mv_cofp, _surg_plate(side), "Y"),
+                "cop_y_ns":          _cofp_mm(mv_cofp, _ns_plate(side),   "Y"),
+                "knee_moment_surg":  _peak_knee_moment(mv_moments, side),
+                "knee_moment_ns":    _peak_knee_moment(mv_moments, ns),
+                "ankle_moment_surg": _peak_ankle_moment(mv_moments, side),
+                "ankle_moment_ns":   _peak_ankle_moment(mv_moments, ns),
+            }
+            print(f"  Jump height   = {res.jump_height_cm:.2f} (V3D units)")
+            print(f"  Propulsion LSI= {res.propulsion_lsi:.1f}%")
+            print(f"  Peak force LSI= {res.peak_force_lsi:.1f}%")
+        else:
+            print("  [SKIPPED] Forces file missing or empty.")
+        print()
+
+        # ── Endurance Squat ───────────────────────────────────────────────────────
+        print("[main] -- Endurance Squat ------------------------")
+        es_forces = _load(folder, "endurance_forces", rate=ANALOG_RATE, verbose=True)
+        es_joints = _load(folder, "endurance_joints", rate=KINEMATIC_RATE, verbose=True)
+
+        fz_s, fz_ns = _bilateral_forces(es_forces, side)
+        if fz_s is None or fz_ns is None:
+            sp  = _surg_plate(side)
+            nsp = _ns_plate(side)
+            sigs = es_forces.available_signals()
+            if sigs:
+                print(f"  [DIAG] Forces file loaded but FP signals not found.")
+                print(f"  [DIAG] Looking for '{sp}'/'{nsp}' (Z). File has: {sigs}")
+            else:
+                print(f"  [DIAG] Forces file not found or empty.")
+                print(f"  [DIAG] Expected: '{EXPORT_FILES.get('endurance_forces')}'")
+                txt_files = sorted(f.name for f in folder.glob("*ndur*") or folder.glob("*squat*"))
+                if not txt_files:
+                    txt_files = sorted(f.name for f in folder.glob("*.txt") if "ndur" in f.name.lower() or "squat" in f.name.lower())
+                if txt_files:
+                    print(f"  [DIAG] Files with 'endur'/'squat' in name: {txt_files}")
+        if fz_s is not None and fz_ns is not None:
+            k_surg = _get_knee(es_joints, side)
+            k_ns   = _get_knee(es_joints, ns)
+            res = es_mod.analyse(
+                fz_surg=fz_s, fz_ns=fz_ns,
+                rate_f=ANALOG_RATE, bw_n=bw_n, surg_side=side,
+                knee_valgus_surg=k_surg.get("valgus"),
+                knee_valgus_ns=k_ns.get("valgus"),
+                rate_k=KINEMATIC_RATE,
+            )
+            test_results["endurance_squat"] = res
+            es_cofp    = _load(folder, "endurance_cofp",    rate=ANALOG_RATE)
+            es_moments = _load(folder, "endurance_moments", rate=KINEMATIC_RATE)
+            all_signals["endurance_squat"] = {
+                "fz_surg":          fz_s,
+                "fz_ns":            fz_ns,
+                "cop_y_surg":       _cofp_mm(es_cofp, _surg_plate(side), "Y"),
+                "cop_y_ns":         _cofp_mm(es_cofp, _ns_plate(side),   "Y"),
+                "knee_moment_surg": _peak_knee_moment(es_moments, side),
+                "knee_moment_ns":   _peak_knee_moment(es_moments, ns),
+            }
+            print(f"  Reps detected = {res.n_cycles}")
+            print(f"  Mean LSI      = {res.mean_lsi_peak:.1f}%")
+            print(f"  Fatigue drift = {res.fatigue_drift_pct:.1f}%")
+        else:
+            print("  [SKIPPED] Forces file missing or empty.")
+        print()
+
+        # ── Single-Leg Vertical Jump ──────────────────────────────────────────────
+        print("[main] -- Single-Leg Vertical Jump ---------------")
+        sl_l_data   = _load(folder, "sl_left_data",    rate=ANALOG_RATE)
+        sl_l_forces = _load(folder, "sl_left_forces",  rate=ANALOG_RATE)
+        sl_l_joints = _load(folder, "sl_left_joints",  rate=KINEMATIC_RATE)
+        sl_r_data   = _load(folder, "sl_right_data",   rate=ANALOG_RATE)
+        sl_r_forces = _load(folder, "sl_right_forces", rate=ANALOG_RATE)
+        sl_r_joints = _load(folder, "sl_right_joints", rate=KINEMATIC_RATE)
+
+        fz_left  = sl_l_forces.timeseries("FP3", "Z")
+        fz_right = sl_r_forces.timeseries("FP3", "Z")
+
+        jh_l = sl_l_data.scalar(SCALAR_SIGNAL_NAMES["jump_height_l"])
+        jh_r = sl_r_data.scalar(SCALAR_SIGNAL_NAMES["jump_height_r"])
+        if not np.isnan(jh_l): jh_l *= JUMP_HEIGHT_SCALE
+        if not np.isnan(jh_r): jh_r *= JUMP_HEIGHT_SCALE
+
+        if fz_left is not None or fz_right is not None:
+            if side == "L":
+                fz_surg_sl, fz_ns_sl = fz_left,  fz_right
+                jh_surg,    jh_ns    = jh_l,      jh_r
+                knee_surg_sl = _get_knee(sl_l_joints, "L")
+                knee_ns_sl   = _get_knee(sl_r_joints, "R")
+            else:
+                fz_surg_sl, fz_ns_sl = fz_right, fz_left
+                jh_surg,    jh_ns    = jh_r,     jh_l
+                knee_surg_sl = _get_knee(sl_r_joints, "R")
+                knee_ns_sl   = _get_knee(sl_l_joints, "L")
+
+            surg_limb = sl_mod.analyse_limb(
+                fz=fz_surg_sl, rate_f=ANALOG_RATE, bw_n=bw_n,
+                side="Surgical",     jump_height_scalar=jh_surg,
+                knee_data=knee_surg_sl, rate_k=KINEMATIC_RATE,
+            )
+            ns_limb = sl_mod.analyse_limb(
+                fz=fz_ns_sl,   rate_f=ANALOG_RATE, bw_n=bw_n,
+                side="Non-Surgical", jump_height_scalar=jh_ns,
+                knee_data=knee_ns_sl,   rate_k=KINEMATIC_RATE,
+            )
+            res = sl_mod.combine(surg_limb, ns_limb)
+            test_results["single_leg_jump"] = res
+            # Load per-side COFP and moments (side-specific files for single-leg tests)
+            sl_surg_cofp_key = "sl_left_cofp"  if side == "L" else "sl_right_cofp"
+            sl_ns_cofp_key   = "sl_right_cofp" if side == "L" else "sl_left_cofp"
+            sl_surg_mom_key  = "sl_left_moments"  if side == "L" else "sl_right_moments"
+            sl_ns_mom_key    = "sl_right_moments" if side == "L" else "sl_left_moments"
+            sl_surg_cofp = _load(folder, sl_surg_cofp_key, rate=ANALOG_RATE)
+            sl_ns_cofp   = _load(folder, sl_ns_cofp_key,   rate=ANALOG_RATE)
+            sl_surg_mom  = _load(folder, sl_surg_mom_key,  rate=KINEMATIC_RATE)
+            sl_ns_mom    = _load(folder, sl_ns_mom_key,    rate=KINEMATIC_RATE)
+            # Per-side ankle (joints loaded from SLVL/SLVR files)
+            sl_surg_joints = sl_l_joints if side == "L" else sl_r_joints
+            sl_ns_joints   = sl_r_joints if side == "L" else sl_l_joints
+            ankle_surg_sl  = _get_ankle(sl_surg_joints, side)
+            ankle_ns_sl    = _get_ankle(sl_ns_joints,   ns)
+            hip_surg_sl    = _get_hip(sl_surg_joints, side)
+            hip_ns_sl      = _get_hip(sl_ns_joints,   ns)
+            all_signals["single_leg_jump"] = {
+                "fz_surg":           fz_surg_sl,
+                "fz_ns":             fz_ns_sl,
+                "knee_flex_surg":    knee_surg_sl.get("flex_ext"),
+                "knee_flex_ns":      knee_ns_sl.get("flex_ext"),
+                "knee_valgus_surg":  knee_surg_sl.get("valgus"),
+                "knee_valgus_ns":    knee_ns_sl.get("valgus"),
+                "tib_rot_surg":      knee_surg_sl.get("tib_rot"),
+                "tib_rot_ns":        knee_ns_sl.get("tib_rot"),
+                "ankle_flex_surg":   ankle_surg_sl.get("flex_ext"),
+                "ankle_flex_ns":     ankle_ns_sl.get("flex_ext"),
+                "hip_add_surg":      hip_surg_sl.get("ab_adduction"),
+                "hip_add_ns":        hip_ns_sl.get("ab_adduction"),
+                "hip_ir_surg":       hip_surg_sl.get("int_ext_rot"),
+                "hip_ir_ns":         hip_ns_sl.get("int_ext_rot"),
+                "cop_y_surg":        _cofp_mm(sl_surg_cofp, "FP3", "Y"),
+                "cop_y_ns":          _cofp_mm(sl_ns_cofp,   "FP3", "Y"),
+                "knee_moment_surg":  _peak_knee_moment(sl_surg_mom, side),
+                "knee_moment_ns":    _peak_knee_moment(sl_ns_mom,   ns),
+                "ankle_moment_surg": _peak_ankle_moment(sl_surg_mom, side),
+                "ankle_moment_ns":   _peak_ankle_moment(sl_ns_mom,   ns),
+            }
+            print(f"  Surg jump ht = {res.surgical.jump_height_cm:.2f} (V3D units)")
+            print(f"  NS   jump ht = {res.non_surgical.jump_height_cm:.2f} (V3D units)")
+            print(f"  Jump ht LSI  = {res.lsi_jump_height:.1f}%")
+            print(f"  Peak force LSI={res.lsi_peak_force:.1f}%")
+        else:
+            print("  [SKIPPED] Forces files missing or empty.")
+        print()
+
+        # ── Proprioception ────────────────────────────────────────────────────────
+        print("[main] -- Proprioception -------------------------")
+        #  PCTL1 / PCTR1 = Standard (flat firm ground)
+        #  PCTL2 / PCTR2 = Airex bag (unstable foam — harder, higher COP expected)
+        pctl1 = _load(folder, "pctl1_cofp", rate=ANALOG_RATE, verbose=True)
+        pctl2 = _load(folder, "pctl2_cofp", rate=ANALOG_RATE, verbose=True)
+        pctr1 = _load(folder, "pctr1_cofp", rate=ANALOG_RATE, verbose=True)
+        pctr2 = _load(folder, "pctr2_cofp", rate=ANALOG_RATE, verbose=True)
+
+        def _cop(exp, comp):
+            return _cofp_mm(exp, "FP3", comp)
+
+        # Standard (trial 1 per side)
+        if side == "L":
+            std_xs, std_ys = _cop(pctl1, "X"), _cop(pctl1, "Y")
+            std_xn, std_yn = _cop(pctr1, "X"), _cop(pctr1, "Y")
+            airex_xs, airex_ys = _cop(pctl2, "X"), _cop(pctl2, "Y")
+            airex_xn, airex_yn = _cop(pctr2, "X"), _cop(pctr2, "Y")
+        else:
+            std_xs, std_ys = _cop(pctr1, "X"), _cop(pctr1, "Y")
+            std_xn, std_yn = _cop(pctl1, "X"), _cop(pctl1, "Y")
+            airex_xs, airex_ys = _cop(pctr2, "X"), _cop(pctr2, "Y")
+            airex_xn, airex_yn = _cop(pctl2, "X"), _cop(pctl2, "Y")
+
+        # Stance-plate Fz — lets the analysis drop frames where the other foot
+        # touched down off-plate or the athlete stepped on / off.
+        def _fz(key):
+            return _load(folder, key, rate=ANALOG_RATE).timeseries("FP3", "Z")
+        if side == "L":
+            prop_fz = {"surg_std": _fz("pctl1_forces"), "ns_std": _fz("pctr1_forces"),
+                       "surg_airex": _fz("pctl2_forces"), "ns_airex": _fz("pctr2_forces")}
+        else:
+            prop_fz = {"surg_std": _fz("pctr1_forces"), "ns_std": _fz("pctl1_forces"),
+                       "surg_airex": _fz("pctr2_forces"), "ns_airex": _fz("pctl2_forces")}
+
+        from config import PROP_TRIM_SECONDS
+        has_prop = any(a is not None for a in [std_xs, std_xn, airex_xs, airex_xn])
+        if has_prop:
+            try:
+                res = prop_mod.analyse(
+                    cop_x_surg_std=std_xs,   cop_y_surg_std=std_ys,
+                    cop_x_ns_std=std_xn,     cop_y_ns_std=std_yn,
+                    cop_x_surg_airex=airex_xs, cop_y_surg_airex=airex_ys,
+                    cop_x_ns_airex=airex_xn,   cop_y_ns_airex=airex_yn,
+                    rate_f=ANALOG_RATE,
+                    surg_side=side,
+                    trim_seconds=PROP_TRIM_SECONDS,
+                    fz=prop_fz,
+                )
+                test_results["proprioception"] = res
+
+                # Pass both conditions' COP arrays to the report
+                def _limb_sigs(cond):
+                    if cond is None:
+                        return {"cop_x_surg": None, "cop_y_surg": None,
+                                "cop_x_ns": None,   "cop_y_ns": None}
+                    s = cond.surgical
+                    n = cond.non_surgical
+                    return {
+                        "cop_x_surg": s.cop_x if s else None,
+                        "cop_y_surg": s.cop_y if s else None,
+                        "cop_x_ns":   n.cop_x if n else None,
+                        "cop_y_ns":   n.cop_y if n else None,
+                    }
+
+                all_signals["proprioception"] = {
+                    "standard": _limb_sigs(res.standard),
+                    "airex":    _limb_sigs(res.airex),
                 }
 
-            all_signals["proprioception"] = {
-                "standard": _limb_sigs(res.standard),
-                "airex":    _limb_sigs(res.airex),
-            }
-
-            if res.standard and res.standard.surgical:
-                s = res.standard.surgical
-                print(f"  [Std]  Surg COP vel  = {s.mean_velocity_mm_s:.1f} mm/s")
-                print(f"  [Std]  Surg ellipse  = {s.ellipse_area_mm2:.0f} mm²")
-                print(f"  [Std]  COP vel LSI   = {res.standard.lsi_cop_velocity:.1f}%")
-            if res.airex and res.airex.surgical:
-                s = res.airex.surgical
-                print(f"  [Airex] Surg COP vel = {s.mean_velocity_mm_s:.1f} mm/s")
-                print(f"  [Airex] Surg ellipse = {s.ellipse_area_mm2:.0f} mm²")
-                print(f"  [Airex] COP vel LSI  = {res.airex.lsi_cop_velocity:.1f}%")
-        except Exception as _prop_err:
-            import traceback
-            print(f"  [ERROR] Proprioception analysis failed: {_prop_err}")
-            print(traceback.format_exc())
-    else:
-        print("  [SKIPPED] COFP files missing or empty.")
-        # Diagnostic: show what PCTL/PCTR filenames the code expected
-        for _key in ("pctl1_cofp", "pctl2_cofp", "pctr1_cofp", "pctr2_cofp"):
-            _fn = EXPORT_FILES.get(_key, "")
-            _fp = folder / _fn
-            _exists = "✓ FOUND" if _fp.exists() else "✗ MISSING"
-            print(f"  [DIAG]  {_key}: '{_fn}' → {_exists}")
-        # Show any PCTL/PCTR files that ARE present
-        _prop_files = sorted(
-            f.name for f in folder.glob("*.txt")
-            if any(x in f.name.upper() for x in ("PCTL", "PCTR", "PROP", "BALANCE"))
-        )
-        if _prop_files:
-            print(f"  [DIAG]  PCTL/PCTR files found in folder: {_prop_files}")
+                if res.standard and res.standard.surgical:
+                    s = res.standard.surgical
+                    print(f"  [Std]  Surg COP vel  = {s.mean_velocity_mm_s:.1f} mm/s")
+                    print(f"  [Std]  Surg ellipse  = {s.ellipse_area_mm2:.0f} mm²")
+                    print(f"  [Std]  COP vel LSI   = {res.standard.lsi_cop_velocity:.1f}%")
+                if res.airex and res.airex.surgical:
+                    s = res.airex.surgical
+                    print(f"  [Airex] Surg COP vel = {s.mean_velocity_mm_s:.1f} mm/s")
+                    print(f"  [Airex] Surg ellipse = {s.ellipse_area_mm2:.0f} mm²")
+                    print(f"  [Airex] COP vel LSI  = {res.airex.lsi_cop_velocity:.1f}%")
+            except Exception as _prop_err:
+                import traceback
+                print(f"  [ERROR] Proprioception analysis failed: {_prop_err}")
+                print(traceback.format_exc())
         else:
-            print(f"  [DIAG]  No PCTL/PCTR files found at all — check config.py EXPORT_FILES")
-    print()
+            print("  [SKIPPED] COFP files missing or empty.")
+            # Diagnostic: show what PCTL/PCTR filenames the code expected
+            for _key in ("pctl1_cofp", "pctl2_cofp", "pctr1_cofp", "pctr2_cofp"):
+                _fn = EXPORT_FILES.get(_key, "")
+                _fp = folder / _fn
+                _exists = "✓ FOUND" if _fp.exists() else "✗ MISSING"
+                print(f"  [DIAG]  {_key}: '{_fn}' → {_exists}")
+            # Show any PCTL/PCTR files that ARE present
+            _prop_files = sorted(
+                f.name for f in folder.glob("*.txt")
+                if any(x in f.name.upper() for x in ("PCTL", "PCTR", "PROP", "BALANCE"))
+            )
+            if _prop_files:
+                print(f"  [DIAG]  PCTL/PCTR files found in folder: {_prop_files}")
+            else:
+                print(f"  [DIAG]  No PCTL/PCTR files found at all — check config.py EXPORT_FILES")
+        print()
 
     # ── RTR composite score ───────────────────────────────────────────────────
     rtr_metrics = _collect_rtr_metrics(test_results)
@@ -1608,6 +1647,8 @@ def _collect_rtr_metrics(results: dict) -> dict:
     # ── Proprioception / Balance ──────────────────────────────────────────────
     prop = results.get("proprioception")
     if prop and prop.standard and not _isnan(prop.standard.lsi_cop_velocity):
+        # Failed stance hold (foot moved / touchdown) is scored, not dropped.
+        # The report applies the same rule; its value wins when merged.
         m["cop_velocity_lsi"] = prop.standard.lsi_cop_velocity
 
     # ── Endurance Squat ───────────────────────────────────────────────────────

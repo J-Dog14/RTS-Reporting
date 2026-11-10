@@ -1,0 +1,576 @@
+!=====================================================================
+! RTS Pipeline v14  —  "model + export only"
+!
+! Visual3D does ONLY what Python can't:
+!   1. build / apply the model
+!   2. filter markers + forces (one matched cutoff) for inverse dynamics
+!   3. compute model-based signals (angles, moments, powers, COG)
+!   4. export everything, per trial, untouched
+!
+! Python (RTS-Reporting) does ALL metrics: contact detection, jump height,
+! RSI, RFD, loading rate, impulse, LSIs, events, balance, scoring.
+! No metrics, events, ASIs or report graphs are calculated here.
+!
+! Exports go to:  D:\RTS 2.0\Data Exports v14\
+!   General.txt               MASS_N + Affected_Leg
+!   <Test> Forces.txt         FP1-3 force + COP, ORIGINAL (unfiltered, analog rate)
+!   <Test> Model.txt          angles / moments / powers / COG (point rate)
+! Every trial is its own column group — Python analyses each trial and
+! averages the METRICS, never the curves.
+!
+! Changes vs RTS Pipeline-FULL 13
+!   - all Metric_*, Event_*, ASI, RSI, JH, CT, Export_Graph steps removed
+!     (v13 RSI was RSI_L + RSI_R, i.e. 2x; "Force Left/Right" was a contact
+!      MEAN used downstream as a peak; forces were 6 Hz filtered before export)
+!   - markers AND forces filtered at the same 12 Hz cutoff (used only for
+!     inverse dynamics); raw forces/COP are what gets exported
+!   - ankle moments + hip/knee/ankle joint powers added
+!   - unused tags (Squat, Lateral Bounds) dropped
+!=====================================================================
+
+
+!---------------------------------------------------------------------
+! 1. Use processed (filtered) data for model-based calculations
+!---------------------------------------------------------------------
+Set_Use_Processed_Targets
+/USE_PROCESSED=TRUE
+;
+
+Set_Use_Processed_Forces
+/USE_PROCESSED=TRUE
+;
+
+
+!---------------------------------------------------------------------
+! 2. Model
+!---------------------------------------------------------------------
+Create_Hybrid_Model
+ /SET_PROMPT=Open standing file
+;
+
+Apply_Model_Template
+ /MODEL_TEMPLATE= F:\RTS Functional Screen\V3D\RTS Model Template.mdh
+;
+
+Set_Subject_Mass
+ /CALIBRATION_FILE=<?=$working_directory . "Static*.c3d"?>
+ /WEIGHT=<?=$session["Weight"]?>
+ /UNITS=Lb
+;
+
+Set_Subject_Height
+ /CALIBRATION_FILE=<?=$working_directory . "Static*.c3d"?>
+ /HEIGHT=<?=$subject["Height"]?>
+ /UNITS=in
+;
+
+Create_Text_Data
+/SIGNAL_FOLDER=METRIC
+/SIGNAL_NAMES=Affected_Leg
+;
+
+
+!---------------------------------------------------------------------
+! 3. Motion files + tags
+!---------------------------------------------------------------------
+File_Open
+ /SET_PROMPT=File_Open
+;
+
+Assign_Model_File
+ /MOTION_FILE_NAMES=*DJ*.C3D + *DL*.C3D + *Vert*.C3D + *CMJ*.C3D + *End*.C3D + *SLV*.C3D + *PCT*.C3D
+;
+
+Assign_Tags_To_Files
+ /MOTION_FILE_NAMES=*DJ*.C3D
+ /TAGS=DJ
+;
+
+Assign_Tags_To_Files
+ /MOTION_FILE_NAMES=*DL*.C3D
+ /TAGS=DL
+;
+
+Assign_Tags_To_Files
+ /MOTION_FILE_NAMES=*Vert*.C3D + *CMJ*.C3D
+ /TAGS=CMJ
+;
+
+Assign_Tags_To_Files
+ /MOTION_FILE_NAMES=*End*.C3D
+ /TAGS=Endurance
+;
+
+Assign_Tags_To_Files
+ /MOTION_FILE_NAMES=*SLVL*.C3D
+ /TAGS=SLVL
+;
+
+Assign_Tags_To_Files
+ /MOTION_FILE_NAMES=*SLVR*.C3D
+ /TAGS=SLVR
+;
+
+Assign_Tags_To_Files
+ /MOTION_FILE_NAMES=*PCTL1*.C3D
+ /TAGS=PCTL1
+;
+
+Assign_Tags_To_Files
+ /MOTION_FILE_NAMES=*PCTR1*.C3D
+ /TAGS=PCTR1
+;
+
+Assign_Tags_To_Files
+ /MOTION_FILE_NAMES=*PCTL2*.C3D
+ /TAGS=PCTL2
+;
+
+Assign_Tags_To_Files
+ /MOTION_FILE_NAMES=*PCTR2*.C3D
+ /TAGS=PCTR2
+;
+
+
+!---------------------------------------------------------------------
+! 4. Filtering — matched cutoff for markers and forces.
+!    These PROCESSED signals feed inverse dynamics only.
+!    Exports below use the ORIGINAL (unfiltered) force/COP.
+!---------------------------------------------------------------------
+Select_Active_File
+/FILE_NAME=ALL_FILES
+;
+
+Lowpass_Filter
+/SIGNAL_TYPES=TARGET
+/FREQUENCY_CUTOFF=12
+;
+
+Lowpass_Filter
+/SIGNAL_TYPES=FORCE
+/FREQUENCY_CUTOFF=12
+;
+
+Lowpass_Filter
+/SIGNAL_TYPES=COFP
+/FREQUENCY_CUTOFF=12
+;
+
+Lowpass_Filter
+/SIGNAL_TYPES=FREEMOMENT
+/FREQUENCY_CUTOFF=12
+;
+
+Multiply_Signals_By_Constant
+/SIGNAL_TYPES=METRIC
+/SIGNAL_FOLDER=PROCESSED
+/SIGNAL_NAMES=MASS
+/RESULT_TYPES=METRIC
+/RESULT_NAME=MASS_N
+/APPLY_AS_SUFFIX_TO_SIGNAL_NAME=FALSE
+/CONSTANT=9.81
+;
+
+
+!---------------------------------------------------------------------
+! 5. Model-based data (movement trials only — not balance)
+!    NEGATE flags copied from v13 so angle/moment signs are unchanged.
+!---------------------------------------------------------------------
+Select_Active_File
+/FILE_NAME=DJ+DL+CMJ+Endurance+SLVL+SLVR
+;
+
+! ---- Joint angles ----
+Compute_Model_Based_Data
+/RESULT_NAME=Pelvis_Angle
+/FUNCTION=JOINT_ANGLE
+/SEGMENT=RPV
+/RESOLUTION_COORDINATE_SYSTEM=
+/NEGATEX=TRUE
+/NEGATEY=TRUE
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=R_Hip_Angle
+/FUNCTION=JOINT_ANGLE
+/SEGMENT=RTH
+/REFERENCE_SEGMENT=RPV
+/RESOLUTION_COORDINATE_SYSTEM=
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=L_Hip_Angle
+/FUNCTION=JOINT_ANGLE
+/SEGMENT=LTH
+/REFERENCE_SEGMENT=RPV
+/RESOLUTION_COORDINATE_SYSTEM=
+/NEGATEY=TRUE
+/NEGATEZ=TRUE
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=R_Knee_Angle
+/FUNCTION=JOINT_ANGLE
+/SEGMENT=RSK
+/REFERENCE_SEGMENT=RTH
+/RESOLUTION_COORDINATE_SYSTEM=
+/NEGATEX=TRUE
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=L_Knee_Angle
+/FUNCTION=JOINT_ANGLE
+/SEGMENT=LSK
+/REFERENCE_SEGMENT=LTH
+/RESOLUTION_COORDINATE_SYSTEM=
+/NEGATEX=TRUE
+/NEGATEY=TRUE
+/NEGATEZ=TRUE
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=R_Ankle_Angle
+/FUNCTION=JOINT_ANGLE
+/SEGMENT=RMF
+/REFERENCE_SEGMENT=RSK
+/RESOLUTION_COORDINATE_SYSTEM=
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=L_Ankle_Angle
+/FUNCTION=JOINT_ANGLE
+/SEGMENT=LMF
+/REFERENCE_SEGMENT=LSK
+/RESOLUTION_COORDINATE_SYSTEM=
+/NEGATEY=TRUE
+/NEGATEZ=TRUE
+;
+
+! ---- Joint moments (Nm; Python normalises to body mass) ----
+Compute_Model_Based_Data
+/RESULT_NAME=R_Hip_Moment
+/FUNCTION=JOINT_MOMENT
+/SEGMENT=RTH
+/REFERENCE_SEGMENT=
+/RESOLUTION_COORDINATE_SYSTEM=RPV
+/NEGATEX=TRUE
+/NEGATEY=TRUE
+/NEGATEZ=TRUE
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=L_Hip_Moment
+/FUNCTION=JOINT_MOMENT
+/SEGMENT=LTH
+/REFERENCE_SEGMENT=
+/RESOLUTION_COORDINATE_SYSTEM=RPV
+/NEGATEX=TRUE
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=R_Knee_Moment
+/FUNCTION=JOINT_MOMENT
+/SEGMENT=RSK
+/REFERENCE_SEGMENT=
+/RESOLUTION_COORDINATE_SYSTEM=RTH
+/NEGATEY=TRUE
+/NEGATEZ=TRUE
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=L_Knee_Moment
+/FUNCTION=JOINT_MOMENT
+/SEGMENT=LSK
+/REFERENCE_SEGMENT=
+/RESOLUTION_COORDINATE_SYSTEM=LTH
+;
+
+! NEW — ankle moments. Mirrors the knee NEGATE pattern; CHECK SIGNS on
+! first run: during SLV push-off the sagittal (X) plantarflexor moment
+! should have the same sign on both sides.
+Compute_Model_Based_Data
+/RESULT_NAME=R_Ankle_Moment
+/FUNCTION=JOINT_MOMENT
+/SEGMENT=RMF
+/REFERENCE_SEGMENT=
+/RESOLUTION_COORDINATE_SYSTEM=RSK
+/NEGATEY=TRUE
+/NEGATEZ=TRUE
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=L_Ankle_Moment
+/FUNCTION=JOINT_MOMENT
+/SEGMENT=LMF
+/REFERENCE_SEGMENT=
+/RESOLUTION_COORDINATE_SYSTEM=LSK
+;
+
+! ---- NEW — joint powers (W) ----
+Compute_Model_Based_Data
+/RESULT_NAME=R_Hip_Power
+/FUNCTION=JOINT_POWER
+/SEGMENT=RTH
+/REFERENCE_SEGMENT=
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=L_Hip_Power
+/FUNCTION=JOINT_POWER
+/SEGMENT=LTH
+/REFERENCE_SEGMENT=
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=R_Knee_Power
+/FUNCTION=JOINT_POWER
+/SEGMENT=RSK
+/REFERENCE_SEGMENT=
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=L_Knee_Power
+/FUNCTION=JOINT_POWER
+/SEGMENT=LSK
+/REFERENCE_SEGMENT=
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=R_Ankle_Power
+/FUNCTION=JOINT_POWER
+/SEGMENT=RMF
+/REFERENCE_SEGMENT=
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=L_Ankle_Power
+/FUNCTION=JOINT_POWER
+/SEGMENT=LMF
+/REFERENCE_SEGMENT=
+;
+
+! ---- Pelvis centre of gravity (drop depth / countermovement depth) ----
+Compute_Model_Based_Data
+/RESULT_NAME=Pelvis_CG
+/SUBJECT_TAG=ALL_SUBJECTS
+/FUNCTION=SEG_CGPOSITION
+/SEGMENT=RPV
+;
+
+
+!---------------------------------------------------------------------
+! 6. Exports
+!---------------------------------------------------------------------
+
+! ---- General (one value per session) ----
+Select_Active_File
+/FILE_NAME=DJ
+;
+
+Export_Data_To_Ascii_File
+/FILE_NAME=D:\RTS 2.0\Data Exports v14\General.txt
+/SIGNAL_TYPES=TEXT_DATA+METRIC
+/SIGNAL_FOLDER=METRIC+PROCESSED
+/SIGNAL_NAMES=Affected_Leg+MASS_N
+/COMPONENT_SEQUENCE=ALL
+/SIGNAL_PRECISION=5
+;
+
+! ---- Forces + COP: ORIGINAL (unfiltered), all three plates ----
+! Repeat this pair for each tag. Same signal list every time so Python
+! always finds FP1/FP2/FP3 force (X,Y,Z) and COP (X,Y,Z).
+
+Select_Active_File
+/FILE_NAME=DJ
+;
+Export_Data_To_Ascii_File
+/FILE_NAME=D:\RTS 2.0\Data Exports v14\DJ Forces.txt
+/SIGNAL_TYPES=FORCE+FORCE+FORCE+COFP+COFP+COFP
+/SIGNAL_FOLDER=ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL
+/SIGNAL_NAMES=FP1+FP2+FP3+FP1+FP2+FP3
+/COMPONENT_SEQUENCE=ALL
+/SIGNAL_PRECISION=4
+;
+
+Select_Active_File
+/FILE_NAME=DL
+;
+Export_Data_To_Ascii_File
+/FILE_NAME=D:\RTS 2.0\Data Exports v14\DL Forces.txt
+/SIGNAL_TYPES=FORCE+FORCE+FORCE+COFP+COFP+COFP
+/SIGNAL_FOLDER=ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL
+/SIGNAL_NAMES=FP1+FP2+FP3+FP1+FP2+FP3
+/COMPONENT_SEQUENCE=ALL
+/SIGNAL_PRECISION=4
+;
+
+Select_Active_File
+/FILE_NAME=CMJ
+;
+Export_Data_To_Ascii_File
+/FILE_NAME=D:\RTS 2.0\Data Exports v14\CMJ Forces.txt
+/SIGNAL_TYPES=FORCE+FORCE+FORCE+COFP+COFP+COFP
+/SIGNAL_FOLDER=ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL
+/SIGNAL_NAMES=FP1+FP2+FP3+FP1+FP2+FP3
+/COMPONENT_SEQUENCE=ALL
+/SIGNAL_PRECISION=4
+;
+
+Select_Active_File
+/FILE_NAME=Endurance
+;
+Export_Data_To_Ascii_File
+/FILE_NAME=D:\RTS 2.0\Data Exports v14\Endurance Forces.txt
+/SIGNAL_TYPES=FORCE+FORCE+FORCE+COFP+COFP+COFP
+/SIGNAL_FOLDER=ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL
+/SIGNAL_NAMES=FP1+FP2+FP3+FP1+FP2+FP3
+/COMPONENT_SEQUENCE=ALL
+/SIGNAL_PRECISION=4
+;
+
+Select_Active_File
+/FILE_NAME=SLVL
+;
+Export_Data_To_Ascii_File
+/FILE_NAME=D:\RTS 2.0\Data Exports v14\SLVL Forces.txt
+/SIGNAL_TYPES=FORCE+FORCE+FORCE+COFP+COFP+COFP
+/SIGNAL_FOLDER=ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL
+/SIGNAL_NAMES=FP1+FP2+FP3+FP1+FP2+FP3
+/COMPONENT_SEQUENCE=ALL
+/SIGNAL_PRECISION=4
+;
+
+Select_Active_File
+/FILE_NAME=SLVR
+;
+Export_Data_To_Ascii_File
+/FILE_NAME=D:\RTS 2.0\Data Exports v14\SLVR Forces.txt
+/SIGNAL_TYPES=FORCE+FORCE+FORCE+COFP+COFP+COFP
+/SIGNAL_FOLDER=ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL
+/SIGNAL_NAMES=FP1+FP2+FP3+FP1+FP2+FP3
+/COMPONENT_SEQUENCE=ALL
+/SIGNAL_PRECISION=4
+;
+
+Select_Active_File
+/FILE_NAME=PCTL1
+;
+Export_Data_To_Ascii_File
+/FILE_NAME=D:\RTS 2.0\Data Exports v14\PCTL1 Forces.txt
+/SIGNAL_TYPES=FORCE+FORCE+FORCE+COFP+COFP+COFP
+/SIGNAL_FOLDER=ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL
+/SIGNAL_NAMES=FP1+FP2+FP3+FP1+FP2+FP3
+/COMPONENT_SEQUENCE=ALL
+/SIGNAL_PRECISION=4
+;
+
+Select_Active_File
+/FILE_NAME=PCTR1
+;
+Export_Data_To_Ascii_File
+/FILE_NAME=D:\RTS 2.0\Data Exports v14\PCTR1 Forces.txt
+/SIGNAL_TYPES=FORCE+FORCE+FORCE+COFP+COFP+COFP
+/SIGNAL_FOLDER=ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL
+/SIGNAL_NAMES=FP1+FP2+FP3+FP1+FP2+FP3
+/COMPONENT_SEQUENCE=ALL
+/SIGNAL_PRECISION=4
+;
+
+Select_Active_File
+/FILE_NAME=PCTL2
+;
+Export_Data_To_Ascii_File
+/FILE_NAME=D:\RTS 2.0\Data Exports v14\PCTL2 Forces.txt
+/SIGNAL_TYPES=FORCE+FORCE+FORCE+COFP+COFP+COFP
+/SIGNAL_FOLDER=ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL
+/SIGNAL_NAMES=FP1+FP2+FP3+FP1+FP2+FP3
+/COMPONENT_SEQUENCE=ALL
+/SIGNAL_PRECISION=4
+;
+
+Select_Active_File
+/FILE_NAME=PCTR2
+;
+Export_Data_To_Ascii_File
+/FILE_NAME=D:\RTS 2.0\Data Exports v14\PCTR2 Forces.txt
+/SIGNAL_TYPES=FORCE+FORCE+FORCE+COFP+COFP+COFP
+/SIGNAL_FOLDER=ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL
+/SIGNAL_NAMES=FP1+FP2+FP3+FP1+FP2+FP3
+/COMPONENT_SEQUENCE=ALL
+/SIGNAL_PRECISION=4
+;
+
+! ---- Model-based signals (movement trials) ----
+! Same 20-signal list for every test.
+
+Select_Active_File
+/FILE_NAME=DJ
+;
+Export_Data_To_Ascii_File
+/FILE_NAME=D:\RTS 2.0\Data Exports v14\DJ Model.txt
+/SIGNAL_TYPES=LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED
+/SIGNAL_FOLDER=ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL
+/SIGNAL_NAMES=Pelvis_Angle+L_Hip_Angle+R_Hip_Angle+L_Knee_Angle+R_Knee_Angle+L_Ankle_Angle+R_Ankle_Angle+L_Hip_Moment+R_Hip_Moment+L_Knee_Moment+R_Knee_Moment+L_Ankle_Moment+R_Ankle_Moment+L_Hip_Power+R_Hip_Power+L_Knee_Power+R_Knee_Power+L_Ankle_Power+R_Ankle_Power+Pelvis_CG
+/COMPONENT_SEQUENCE=ALL
+/SIGNAL_PRECISION=4
+;
+
+Select_Active_File
+/FILE_NAME=DL
+;
+Export_Data_To_Ascii_File
+/FILE_NAME=D:\RTS 2.0\Data Exports v14\DL Model.txt
+/SIGNAL_TYPES=LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED
+/SIGNAL_FOLDER=ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL
+/SIGNAL_NAMES=Pelvis_Angle+L_Hip_Angle+R_Hip_Angle+L_Knee_Angle+R_Knee_Angle+L_Ankle_Angle+R_Ankle_Angle+L_Hip_Moment+R_Hip_Moment+L_Knee_Moment+R_Knee_Moment+L_Ankle_Moment+R_Ankle_Moment+L_Hip_Power+R_Hip_Power+L_Knee_Power+R_Knee_Power+L_Ankle_Power+R_Ankle_Power+Pelvis_CG
+/COMPONENT_SEQUENCE=ALL
+/SIGNAL_PRECISION=4
+;
+
+Select_Active_File
+/FILE_NAME=CMJ
+;
+Export_Data_To_Ascii_File
+/FILE_NAME=D:\RTS 2.0\Data Exports v14\CMJ Model.txt
+/SIGNAL_TYPES=LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED
+/SIGNAL_FOLDER=ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL
+/SIGNAL_NAMES=Pelvis_Angle+L_Hip_Angle+R_Hip_Angle+L_Knee_Angle+R_Knee_Angle+L_Ankle_Angle+R_Ankle_Angle+L_Hip_Moment+R_Hip_Moment+L_Knee_Moment+R_Knee_Moment+L_Ankle_Moment+R_Ankle_Moment+L_Hip_Power+R_Hip_Power+L_Knee_Power+R_Knee_Power+L_Ankle_Power+R_Ankle_Power+Pelvis_CG
+/COMPONENT_SEQUENCE=ALL
+/SIGNAL_PRECISION=4
+;
+
+Select_Active_File
+/FILE_NAME=Endurance
+;
+Export_Data_To_Ascii_File
+/FILE_NAME=D:\RTS 2.0\Data Exports v14\Endurance Model.txt
+/SIGNAL_TYPES=LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED
+/SIGNAL_FOLDER=ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL
+/SIGNAL_NAMES=Pelvis_Angle+L_Hip_Angle+R_Hip_Angle+L_Knee_Angle+R_Knee_Angle+L_Ankle_Angle+R_Ankle_Angle+L_Hip_Moment+R_Hip_Moment+L_Knee_Moment+R_Knee_Moment+L_Ankle_Moment+R_Ankle_Moment+L_Hip_Power+R_Hip_Power+L_Knee_Power+R_Knee_Power+L_Ankle_Power+R_Ankle_Power+Pelvis_CG
+/COMPONENT_SEQUENCE=ALL
+/SIGNAL_PRECISION=4
+;
+
+Select_Active_File
+/FILE_NAME=SLVL
+;
+Export_Data_To_Ascii_File
+/FILE_NAME=D:\RTS 2.0\Data Exports v14\SLVL Model.txt
+/SIGNAL_TYPES=LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED
+/SIGNAL_FOLDER=ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL
+/SIGNAL_NAMES=Pelvis_Angle+L_Hip_Angle+R_Hip_Angle+L_Knee_Angle+R_Knee_Angle+L_Ankle_Angle+R_Ankle_Angle+L_Hip_Moment+R_Hip_Moment+L_Knee_Moment+R_Knee_Moment+L_Ankle_Moment+R_Ankle_Moment+L_Hip_Power+R_Hip_Power+L_Knee_Power+R_Knee_Power+L_Ankle_Power+R_Ankle_Power+Pelvis_CG
+/COMPONENT_SEQUENCE=ALL
+/SIGNAL_PRECISION=4
+;
+
+Select_Active_File
+/FILE_NAME=SLVR
+;
+Export_Data_To_Ascii_File
+/FILE_NAME=D:\RTS 2.0\Data Exports v14\SLVR Model.txt
+/SIGNAL_TYPES=LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED+LINK_MODEL_BASED
+/SIGNAL_FOLDER=ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL+ORIGINAL
+/SIGNAL_NAMES=Pelvis_Angle+L_Hip_Angle+R_Hip_Angle+L_Knee_Angle+R_Knee_Angle+L_Ankle_Angle+R_Ankle_Angle+L_Hip_Moment+R_Hip_Moment+L_Knee_Moment+R_Knee_Moment+L_Ankle_Moment+R_Ankle_Moment+L_Hip_Power+R_Hip_Power+L_Knee_Power+R_Knee_Power+L_Ankle_Power+R_Ankle_Power+Pelvis_CG
+/COMPONENT_SEQUENCE=ALL
+/SIGNAL_PRECISION=4
+;

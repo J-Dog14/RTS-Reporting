@@ -49,7 +49,8 @@ from typing import List, Optional
 
 from helpers.grf import analyse_cop, COPMetrics, lowpass
 
-SUSPECT_RANGE_MM = 150.0   # a single-leg stance COP range beyond this is not sway
+SUSPECT_RANGE_MM = 150.0   # a single-leg stance COP range beyond this = the foot moved
+TOUCHDOWN_FAIL_S = 0.25    # unloaded this long = other foot touched down / stepped off
 
 
 # ─── Result dataclasses ───────────────────────────────────────────────────────
@@ -71,8 +72,13 @@ class PropLimbResult:
     cop_y:  object = field(default=None, repr=False)   # AP (mm)
     rate:   float  = np.nan
 
-    # Data-quality
-    suspect:         bool  = False   # COP range too large to be sway
+    # Stance-hold result. A trial where the foot moves or the other foot
+    # touches down is a FAILED balance trial — it counts against the athlete
+    # (it is not dropped as bad data).
+    suspect:         bool  = False   # True = failed stance hold (kept for older callers)
+    failed:          bool  = False
+    fail_reason:     str   = ""      # "foot moved", "touchdown", or both
+    touchdown_s:     float = 0.0     # time unloaded (other foot down / stepped off)
     frames_excluded: int   = 0       # frames dropped for low Fz
 
 
@@ -233,6 +239,7 @@ def _analyse_limb(cop_x: Optional[np.ndarray],
         if med > 0:
             keep = f >= 0.8 * med
             result.frames_excluded = int((~keep).sum())
+            result.touchdown_s = result.frames_excluded / rate
             # Keep the longest continuous loaded segment so velocity isn't
             # computed across a gap
             if result.frames_excluded:
@@ -261,7 +268,14 @@ def _analyse_limb(cop_x: Optional[np.ndarray],
     result.range_ml_mm         = metrics.range_ml_mm
     result.ellipse_area_mm2    = metrics.ellipse_area_mm2
     result.rms_displacement_mm = metrics.rms_displacement_mm
-    result.suspect = bool(max(result.range_ap_mm, result.range_ml_mm) > SUSPECT_RANGE_MM)
+    reasons = []
+    if max(result.range_ap_mm, result.range_ml_mm) > SUSPECT_RANGE_MM:
+        reasons.append("foot moved")
+    if result.touchdown_s >= TOUCHDOWN_FAIL_S:
+        reasons.append("touchdown")
+    result.failed = bool(reasons)
+    result.suspect = result.failed
+    result.fail_reason = " + ".join(reasons)
 
     return result
 
