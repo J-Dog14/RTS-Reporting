@@ -964,6 +964,11 @@ def run(session_folder: str,
         sys.exit(1)
 
     from rts14.pipeline import is_v14_folder
+    # Pointed at the parent "Data Exports" folder? Use its v14 subfolder when
+    # that's where the new exports are (the old v13 files sit in the parent).
+    if not is_v14_folder(folder) and is_v14_folder(folder / "v14"):
+        print(f"[main] Using v14 exports in {folder / 'v14'}")
+        folder = folder / "v14"
     IS_V14 = is_v14_folder(folder)
     if IS_V14:
         print("[main] v14 export folder detected (Force_Data.txt / Joint_Data.txt)")

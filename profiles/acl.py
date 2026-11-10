@@ -45,7 +45,7 @@ PROFILE = ReportProfile(
             "focus": "",
         },
         "drop_jump": {
-            "rsi_low": "Stiff-landing pattern likely — progressive plyometric loading indicated.",
+            "rsi_low": "Below target — consistent with a stiff or guarded landing.",
             "targets": f"<b>Targets:</b> RSI ≥ 1.30 m/s · Landing LSI 90–110% · Load rate LSI ≥ 90% · "
                        f"Knee flexion ≥ 60° · Valgus {VALGUS_TARGET} · Tibial IR < 10°.",
             "cap_grf":    "Bilateral GRF (normalised to BW). Orange = surgical, Blue = non-surgical.",
@@ -85,7 +85,7 @@ PROFILE = ReportProfile(
         },
         "max_vertical": {
             "intro":   "Bilateral CMJ — sensitive to subtle propulsion deficits masked at lower intensities.",
-            "pk_low":  "quad/hip extensor deficit; strength work required",
+            "pk_low":  "consistent with a quadriceps / hip extensor deficit",
             "knee_work_gap": "The surgical knee contributes less push-off work while the hip makes up the "
                              "difference — a hip-dominant strategy offloading the quadriceps.",
             "targets": "Targets: ≥ 90% propulsion, ≥ 90% peak force, matched unweighting impulse.",
@@ -108,7 +108,7 @@ PROFILE = ReportProfile(
         },
         "endurance_squat": {
             "intro":     "30s bilateral squat — reveals neuromuscular fatigue-induced asymmetry missed by single-rep testing.",
-            "drift_bad": "surgical limb offloads under prolonged effort. Endurance-specific rehab required.",
+            "drift_bad": "surgical limb offloads under prolonged effort.",
             "targets":   "<b>Targets:</b> Mean LSI ≥ 90% · Fatigue drift < 5% · No progressive offloading across 30s.",
             "description": (
                 "The 30-Second Endurance Squat assesses neuromuscular fatigue and limb symmetry under sustained "
@@ -123,7 +123,7 @@ PROFILE = ReportProfile(
         },
         "single_leg_jump": {
             "intro":   "Highest-demand test — isolates each limb, removing bilateral compensation. Strongest re-injury risk predictor.",
-            "pk_low":  "Force deficit on surgical side — prioritise quad/hip extensor strengthening.",
+            "pk_low":  "Force deficit on the surgical side, consistent with a quadriceps / hip extensor deficit.",
             "knee_work_gap": "The surgical knee does less push-off work while the hip makes up the difference "
                              "— quadriceps avoidance under single-leg load.",
             "targets": f"<b>Targets:</b> Jump height LSI ≥ 90% · Peak GRF LSI ≥ 90% · Valgus {VALGUS_TARGET} · Tibial IR < 10° on surgical limb.",

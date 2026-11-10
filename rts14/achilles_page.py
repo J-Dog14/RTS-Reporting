@@ -9,7 +9,8 @@ summary page:
   3. Push-off work by joint (who does the work: hip, knee or ankle?)
   4. Single-leg jump ankle power + plantarflexor moment, aligned to take-off
   5. Ankle symmetry across tests (moment vs push-off work vs landing absorption)
-  6. Priorities for the PT — driven by which criteria failed
+  6. Where the patient fell short — failed criteria ranked by severity
+     (descriptive only: the report states results, it does not prescribe)
 
 Heel raise is optional: if it wasn't collected the row says NOT TESTED and
 the score simply renormalises over the remaining criteria.
@@ -216,38 +217,51 @@ def findings(test_results, all_signals, crit):
     return out
 
 
-def priorities(crit, has_heel_raise):
-    """What the PT should focus on, driven by the failed criteria."""
-    def bad(group=None, name_has=None):
-        return any(c["status"] in ("DEFICIT", "FAIL") and (group is None or c["group"] == group)
-                   and (name_has is None or name_has in c["name"]) for c in crit)
-    pri = []
-    if not has_heel_raise:
-        pri.append("<b>Add a single-leg heel raise to failure</b> at the next visit (reps and heel height each "
-                   "leg). It is the standard Achilles return criterion and isn't in this score yet.")
-    strong = any(c["name"].endswith("peak plantarflexor moment") and c["status"] == "PASS" for c in crit)
-    if bad("Calf capacity") or bad("Single-leg power", "ankle"):
-        if strong:
-            pri.append("<b>Calf speed, not just strength.</b> Peak plantarflexor moment is already symmetric, so "
-                       "the gap is how fast the calf can produce it: fast concentric single-leg heel raises, "
-                       "loaded calf jumps and pogo-style work, keeping heavy calf loading in to hold capacity.")
-        else:
-            pri.append("<b>Calf capacity, then calf speed.</b> Heavy seated (soleus) and standing (gastroc) calf "
-                       "loading to close the strength gap; then fast concentric single-leg heel raises and "
-                       "loaded calf jumps so the plantarflexors produce force <i>quickly</i>.")
-    if bad("Reactive strength"):
-        pri.append("<b>Reactive progression.</b> Bilateral pogos → single-leg pogos → short-contact drop jumps, "
-                   "cueing a stiff ankle and contact under 0.25 s. Re-test RSI and contact time.")
-    if bad("Landing control"):
-        pri.append("<b>Landing through the forefoot.</b> Low-box forefoot landings and decelerations so the "
-                   "surgical calf takes its share of the landing instead of the hip.")
-    if bad("Balance"):
-        pri.append("<b>Single-leg balance.</b> Eyes-closed single-leg stance on firm ground, then foam, both "
-                   "limbs — the non-surgical side needs it too if it also failed.")
-    if bad("Single-leg power", "height") or bad("Single-leg power", "power"):
-        pri.append("<b>Single-leg power.</b> Once the calf work is in place, single-leg vertical and lateral "
-                   "jumps with full plantarflexion at take-off.")
-    return pri
+_MEANING = {
+    "ankle push-off work": "the surgical calf contributes {pct} of the push-off work the other calf does",
+    "peak plantarflexor moment": "peak calf (plantarflexor) moment is {pct} of the other side",
+    "SL jump height": "single-leg jump height is {pct} of the other side",
+    "SL jump peak power": "single-leg peak power is {pct} of the other side",
+    "RSI": "reactive strength is below the 1.30 m/s target",
+    "contact time": "ground contact is too long to be a reactive (stretch-shortening) rebound",
+    "RFD": "the surgical leg develops force more slowly — {pct} of the other side",
+    "loading rate": "the surgical leg takes up load more slowly on landing — {pct} of the other side",
+    "ankle absorption": "the surgical ankle absorbs {pct} of the landing energy the other ankle does",
+    "impact transient": "initial landing impact on the surgical leg is {pct} of the other side",
+    "Balance": "could not hold eyes-closed single-leg stance",
+}
+
+
+def shortfalls(crit):
+    """Failed / deficit criteria, most severe first, each with a one-line meaning."""
+    bad = [c for c in crit if c["status"] in ("FAIL", "DEFICIT", "PROGRESSING") and c["group"] != "Hop"]
+
+    def severity(c):
+        if c["status"] == "FAIL":
+            return -1e6
+        v = _num(c["lsi"])
+        if v is not None:
+            return v
+        return 50.0 if c["status"] == "DEFICIT" else 80.0
+    bad.sort(key=severity)
+    out = []
+    for c in bad:
+        v = _num(c["lsi"])
+        pct = f"{v:.0f}%" if v is not None else ""
+        meaning = next((m for k, m in _MEANING.items() if k in c["name"]), "")
+        meaning = meaning.format(pct=pct) if meaning else ""
+        if c["group"] == "Balance":
+            who = "both limbs" if c["note"] == "both limbs failed" else "the surgical limb"
+            meaning = f"{who} could not hold eyes-closed single-leg stance (foot moved or touched down)"
+        val = (f"LSI {pct}" if v is not None else (c["sv"] or "")).strip()
+        lab = {"FAIL": "FAIL", "DEFICIT": "deficit", "PROGRESSING": "below target"}[c["status"]]
+        out.append(f"<b>{c['name']}</b> — {val} ({lab}; target {c['target']})"
+                   + (f": {meaning}." if meaning else "."))
+    nt = [c for c in crit if c["status"] == "NOT TESTED"]
+    for c in nt:
+        out.append(f"<i>Not tested: {c['name'].split(' (')[0].lower()} — not collected in this session, so it is "
+                   f"not represented in the score.</i>")
+    return out
 
 
 # ─── flowables ───────────────────────────────────────────────────────────────
@@ -364,12 +378,13 @@ def build(test_results, all_signals, patient_data, P, s, helpers, rate_kin):
                                s["cap"]))
         story.append(Spacer(1, 6))
 
-    # ── priorities ───────────────────────────────────────────────────────────
-    pri = priorities(crit, has_hr)
+    # ── where the patient fell short (descriptive) ───────────────────────────
+    pri = shortfalls(crit)
     if pri:
         st = ParagraphStyle("ach_pri", parent=s["interp"], fontSize=8, leading=11.5, leftIndent=8)
-        rows = [[Paragraph("PRIORITIES FOR THE PT", s["interp_hd"])]] + \
-               [[Paragraph(f"{i + 1}.&nbsp; {p}", st)] for i, p in enumerate(pri)]
+        rows = [[Paragraph("WHERE THE PATIENT FELL SHORT — MOST SEVERE FIRST", s["interp_hd"])]] + \
+               [[Paragraph((f"{i + 1}.&nbsp; " if not p.startswith("<i>") else "") + p, st)]
+                for i, p in enumerate(pri)]
         t = Table(rows, colWidths=[W_FULL])
         t.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FFF6EF")),

@@ -124,6 +124,7 @@ def build_results(folder: str, surg_side: str, body_n: float = None):
                              + _work_rows(m, "DJ", ("neg", "pos")))
         sig["qc"] = m.get("_qc", [])
         sig["joint_work"] = {"kind": "pos", **{tag: {j: _g(m, f"{tag}_{j}_pos_work") for j in ("hip", "knee", "ankle")} for tag in ("s", "n")}}
+        sig["curves"] = {"s": m.get("curves_s"), "s_sd": m.get("curves_s_sd"), "n": m.get("curves_n"), "n_sd": m.get("curves_n_sd"), "event_pct": m.get("event_pct"), "x_label": "% of ground contact (touchdown → take-off)", "event_label": "push-off starts"}
         signals["drop_jump"] = sig
 
     # ── Drop landing ─────────────────────────────────────────────────────────
@@ -147,6 +148,7 @@ def build_results(folder: str, surg_side: str, body_n: float = None):
                              + _work_rows(m, "DL", ("neg",)))
         sig["qc"] = m.get("_qc", [])
         sig["joint_work"] = {"kind": "neg", **{tag: {j: _g(m, f"{tag}_{j}_neg_work") for j in ("hip", "knee", "ankle")} for tag in ("s", "n")}}
+        sig["curves"] = {"s": m.get("curves_s"), "s_sd": m.get("curves_s_sd"), "n": m.get("curves_n"), "n_sd": m.get("curves_n_sd"), "event_pct": None, "x_label": "% of first 500 ms after touchdown", "event_label": ""}
         signals["drop_landing"] = sig
 
     # ── CMJ ──────────────────────────────────────────────────────────────────
@@ -181,6 +183,7 @@ def build_results(folder: str, surg_side: str, body_n: float = None):
                              + _work_rows(m, "CMJ", ("pos",)))
         sig["qc"] = m.get("_qc", [])
         sig["joint_work"] = {"kind": "pos", **{tag: {j: _g(m, f"{tag}_{j}_pos_work") for j in ("hip", "knee", "ankle")} for tag in ("s", "n")}}
+        sig["curves"] = {"s": m.get("curves_s"), "s_sd": m.get("curves_s_sd"), "n": m.get("curves_n"), "n_sd": m.get("curves_n_sd"), "event_pct": m.get("event_pct"), "x_label": "% of movement (onset → take-off)", "event_label": "bottom / push-off"}
         signals["max_vertical"] = sig
 
     # ── Endurance squat ──────────────────────────────────────────────────────
@@ -255,6 +258,7 @@ def build_results(folder: str, surg_side: str, body_n: float = None):
                              + _work_rows(merged, "SLJ", ("pos",), ankle_focus_rtr="ankle_work_lsi"))
         sig["qc"] = (ms.get("_qc") or []) + (mn.get("_qc") or [])
         sig["joint_work"] = {"kind": "pos", **{tag: {j: _g(merged, f"{tag}_{j}_pos_work") for j in ("hip", "knee", "ankle")} for tag in ("s", "n")}}
+        sig["curves"] = {"s": ms.get("curves"), "s_sd": ms.get("curves_sd"), "n": mn.get("curves"), "n_sd": mn.get("curves_sd"), "event_pct": ms.get("event_pct"), "x_label": "% of movement (onset → take-off)", "event_label": "bottom (surgical)"}
         signals["single_leg_jump"] = sig
 
     # ── Balance ──────────────────────────────────────────────────────────────

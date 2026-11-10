@@ -59,7 +59,7 @@ def _time_note(m):
                 f"is rarely restored this soon.")
     if m < 9:
         return (f"{m:.1f} months post-repair — return to sprinting/cutting sport usually falls around "
-                f"9–12 months; clearance should be driven by calf capacity and rate criteria.")
+                f"9–12 months.")
     if m < 12:
         return f"{m:.1f} months post-repair — within the usual return window if calf and rate criteria are met."
     return f"{m:.1f} months post-repair — time no longer the limiting factor; performance criteria are decisive."
@@ -146,11 +146,11 @@ PROFILE = ReportProfile(
         },
         "drop_jump": {
             "rsi_low": "Long contact / low reactive strength — the surgical calf–Achilles unit is not yet tolerating "
-                       "fast stretch-shortening loads. Progress pogo → short-contact drop jumps.",
+                       "fast stretch-shortening loads.",
             "rsi_slow": "The RSI number clears 1.30, but only with a long contact — this is a slow rebound, "
                         "not a reactive (fast stretch-shortening) jump, so it does not clear the calf.",
             "rate_gap": "Force magnitude is close to symmetric but rate is not — the surgical limb avoids fast "
-                        "loading. This is the typical Achilles pattern; train rate, not just strength.",
+                        "loading — the typical pattern after Achilles repair.",
             "targets": "<b>Targets:</b> RSI ≥ 1.30 m/s · Contact < 0.25 s · RFD & load rate LSI ≥ 85–90% · "
                        "Landing LSI 90–110%.",
             "cap_grf":    "Bilateral GRF (normalised to BW). A slower, lower initial rise on the surgical side = "

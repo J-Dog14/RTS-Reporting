@@ -157,10 +157,10 @@ def _lsi_phrase(lsi, metric: str = "loading", units: str = "") -> str:
                 f"approaching return-to-sport target; minor deficit remains.")
     elif v >= 75:
         return (f"Surgical limb {metric} shows a moderate asymmetry (LSI {v:.0f}%) — "
-                f"continued loading progression recommended before clearance.")
+                f"below the 90% return-to-sport threshold.")
     else:
         return (f"Surgical limb {metric} demonstrates a significant deficit "
-                f"(LSI {v:.0f}%) — targeted strengthening and re-testing indicated.")
+                f"(LSI {v:.0f}%) — well below the 90% return-to-sport threshold.")
 
 
 def _delta_phrase(sv, nv, metric, unit="°", warn=None, err=None) -> str:
@@ -172,9 +172,9 @@ def _delta_phrase(sv, nv, metric, unit="°", warn=None, err=None) -> str:
         base  = (f"Surgical {metric}: {sv_f:.1f}{unit} vs non-surgical {nv_f:.1f}{unit} "
                  f"(Δ {sign}{delta:.1f}{unit})")
         if err and abs(delta) > err:
-            return f"{base} — side-to-side difference exceeds {err:.0f}°; targeted intervention recommended."
+            return f"{base} — side-to-side difference exceeds the {err:.0f}° threshold."
         elif warn and abs(delta) > warn:
-            return f"{base} — mild side-to-side asymmetry; monitor closely."
+            return f"{base} — mild side-to-side asymmetry."
         else:
             return f"{base} — side-to-side difference within acceptable range."
     except (TypeError, ValueError):
@@ -1127,7 +1127,8 @@ def build_report(output_path: str, patient_data: dict,
                    fig_r2=None,    cap_r2="",    sum_r2="",
                    fig_cop=None,   cap_cop="",   sum_cop="",
                    description: str = "",
-                   summary: str = "") -> list:
+                   summary: str = "",
+                   curves: dict = None) -> list:
         """
         Lay out one test section:
           title bar → metrics table → interpretation box
@@ -1138,12 +1139,33 @@ def build_report(output_path: str, patient_data: dict,
           optional movement description box at bottom
         Always ends with PageBreak.
         """
+        # ── Joint mechanics (v14): 3×3 angle/moment/power grid + frontal strip,
+        #    mean ± SD of all trials. Replaces the single-trial angle panels.
+        _mech = None
+        if curves and curves.get("s") and any(
+                v is not None and np.any(~np.isnan(v)) for v in curves["s"].values()):
+            from rts14 import mechanics_figs as MF
+            _focus = "ankle" if P.ankle_focus else "knee"
+            interp_lines = list(interp_lines)
+            _ml = MF.mech_findings(curves, _focus)
+            if _ml:
+                # keep the Targets line last
+                tgt = [l for l in interp_lines if l.startswith("<b>Targets")]
+                interp_lines = [l for l in interp_lines if not l.startswith("<b>Targets")] + _ml + tgt
+            _mech = (MF.mechanics_grid(curves, f"{title.title()} — Joint Mechanics",
+                                       curves.get("x_label", ""), focus=_focus),
+                     MF.frontal_strip(curves, "Frontal plane (out-of-plane motion)", curves.get("x_label", "")))
+            for f in (fig_l, fig_r, fig_l2, fig_r2):
+                if f is not None:
+                    plt.close(f)
+            fig_l = fig_r = fig_l2 = fig_r2 = None
+
         # Profiles that don't score knee frontal-plane metrics (e.g. Achilles)
         # show valgus / tibial rotation as context, not as calls to action.
         if not P.flag_knee_frontal:
             def _ctx(txt):
-                for tail in ("; targeted intervention recommended.", "; monitor closely."):
-                    txt = txt.replace(tail, " (context only — not scored for this report type).")
+                if txt and ("valgus" in txt or "tibial" in txt) and "context only" not in txt:
+                    txt = txt.rstrip(".") + " (context only — not scored for this report type)."
                 return txt
             sum_l2, sum_r2 = _ctx(sum_l2), _ctx(sum_r2)
 
@@ -1181,6 +1203,21 @@ def build_report(output_path: str, patient_data: dict,
         if fig_full is not None:
             pg += _fig_full(fig_full, cap_full, s)
             pg += _oneliner(sum_full)
+
+        if _mech is not None:
+            ev_lab = curves.get("event_label") or ""
+            pg.append(CondPageBreak(6.6 * inch))
+            pg.append(_fig_img(_mech[0], W_FULL / inch))
+            pg.append(Paragraph(
+                "Mean ± SD of every analysed trial, time-normalised to the phase on the x-axis"
+                + (f"; dotted line = {ev_lab}" if ev_lab else "") + ". Moments and powers per kg body mass. "
+                "Highlighted column = the joint this report focuses on.", s["cap"]))
+            pg.append(Spacer(1, 4))
+            pg.append(CondPageBreak(2.3 * inch))
+            pg.append(_fig_img(_mech[1], W_FULL / inch))
+            pg.append(Paragraph("Frontal-plane angles shown as change from the start of the phase, so the two "
+                                "sides compare without static-offset differences.", s["cap"]))
+            pg.append(Spacer(1, 4))
 
         if fig_l is not None and fig_r is not None:
             pg += _fig_pair(fig_l, cap_l, fig_r, cap_r, s)
@@ -1418,6 +1455,7 @@ def build_report(output_path: str, patient_data: dict,
         _dj_sum = _lsi_phrase(dj.landing_lsi_200ms, "bilateral landing symmetry")
         _sw = _maybe_ankle(sigs, "drop_jump", valg_fig, tibr_fig, _dj_valg_sum, _dj_tib_sum)
         test_story += _test_page("DROP JUMP", rows, interp,
+            curves=sigs.get("curves"),
             fig_full=grf_fig,  cap_full=P.t("drop_jump", "cap_grf"),
             sum_full=_dj_grf_sum,
             fig_l=flex_fig,    cap_l=P.t("drop_jump", "cap_flex"),
@@ -1563,6 +1601,7 @@ def build_report(output_path: str, patient_data: dict,
         _dl_sum = _lsi_phrase(dl.peak_force_lsi, "peak landing force absorption")
         _sw = _maybe_ankle(sigs, "drop_landing", valg_fig, tibr_fig, _dl_valg_sum, _dl_tib_sum)
         test_story += _test_page("DROP LANDING", rows, interp,
+            curves=sigs.get("curves"),
             fig_full=grf_fig,  cap_full=P.t("drop_landing", "cap_grf"),
             sum_full=_dl_grf_sum,
             fig_l=flex_fig,    cap_l=P.t("drop_landing", "cap_flex"),
@@ -1706,6 +1745,7 @@ def build_report(output_path: str, patient_data: dict,
         _cmj_sum = _lsi_phrase(mvj.peak_force_lsi, "peak propulsive force")
         _sw = _maybe_ankle(sigs, "max_vertical", valg_fig, tibr_fig, _cmj_valg_sum, _cmj_tib_sum)
         test_story += _test_page("MAX VERTICAL JUMP (CMJ)", rows, interp,
+            curves=sigs.get("curves"),
             fig_full=grf_fig,  cap_full=P.t("max_vertical", "cap_grf"),
             sum_full=_cmj_grf_sum,
             fig_l=flex_fig,    cap_l=P.t("max_vertical", "cap_flex"),
@@ -1852,7 +1892,7 @@ def build_report(output_path: str, patient_data: dict,
             interp.append(
                 f"<b>Jump height LSI {jh:.0f}%</b>: "
                 + ("✓ Meets RTS threshold (≥ 90%)." if jh >= 90
-                   else f"{'⚠' if jh >= 75 else '✗'} {100-jh:.0f}% below non-surgical. {'Continued plyometric loading required' if jh >= 75 else 'RTS not recommended — significant power deficit'}."))
+                   else f"{'⚠' if jh >= 75 else '✗'} {100-jh:.0f}% below non-surgical. {'Below the 90% return-to-sport threshold' if jh >= 75 else 'Significant single-leg power deficit — well below the 90% threshold'}."))
         if pk and pk < 90:
             interp.append(f"<b>Peak force LSI {pk:.0f}%</b>: " + P.t("single_leg_jump", "pk_low"))
         imp_l = slj.lsi_impulse if slj.lsi_impulse == slj.lsi_impulse else None
@@ -1908,6 +1948,7 @@ def build_report(output_path: str, patient_data: dict,
         _slj_sum = _lsi_phrase(slj.lsi_jump_height, "single-leg jump height")
         _sw = _maybe_ankle(sigs, "single_leg_jump", valg_fig, tibr_fig, _slj_valg_sum, _slj_tib_sum)
         test_story += _test_page("SINGLE-LEG VERTICAL JUMP", rows, interp,
+            curves=sigs.get("curves"),
             fig_full=grf_fig,  cap_full=P.t("single_leg_jump", "cap_grf"),
             sum_full=_slj_grf_sum,
             fig_l=flex_fig,    cap_l=P.t("single_leg_jump", "cap_flex"),
@@ -1984,7 +2025,7 @@ def build_report(output_path: str, patient_data: dict,
                 if vlsi is not None and vlsi >= 90:
                     verdict = "COP velocity comparable between limbs."
                 elif sv > nv:
-                    verdict = "Surgical limb less stable. Proprioceptive retraining indicated."
+                    verdict = "Surgical limb less stable."
                 else:
                     verdict = "Surgical limb steadier than non-surgical."
                 interp.append(f"Surgical {sv:.0f} mm/s vs Non-Surgical {nv:.0f} mm/s — {verdict}")

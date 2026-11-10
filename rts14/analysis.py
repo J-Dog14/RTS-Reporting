@@ -185,6 +185,78 @@ def _limb_power(out, arr, f, rate):
             "con_work": float(np.sum(con) / rate) if len(con) else np.nan}
 
 
+# ─── time-normalised joint curves (for the mechanics grid) ──────────────────
+
+N_PTS = 101
+
+# curve key → (kind, joint, component, sign).  sign makes "+" read naturally:
+#   angles  : hip/knee + = flexion, ankle + = dorsiflexion (zeroed to standing)
+#   moments : + = extensor (hip, knee) / plantarflexor (ankle), in Nm/kg
+#   power   : W/kg, + = generating, − = absorbing
+#   frontal : change from the start of the window (sign-free comparison)
+CURVE_SPEC = {
+    "hip_ang":    ("angle", "Hip", "X", 1),
+    "knee_ang":   ("angle", "Knee", "X", 1),
+    "ankle_ang":  ("angle", "Ankle", "X", 1),
+    "hip_mom":    ("moment", "Hip", "X", -1),
+    "knee_mom":   ("moment", "Knee", "X", 1),
+    "ankle_mom":  ("moment", "Ankle", "X", -1),
+    "hip_pow":    ("power", "Hip", None, 1),
+    "knee_pow":   ("power", "Knee", None, 1),
+    "ankle_pow":  ("power", "Ankle", None, 1),
+    "hip_add":    ("frontal", "Hip", "Y", 1),
+    "knee_val":   ("frontal", "Knee", "Y", 1),
+    "ankle_fr":   ("frontal", "Ankle", "Y", 1),
+}
+
+
+def _resample(y, n=N_PTS):
+    y = np.asarray(y, float)
+    if y is None or len(y) < 3 or np.all(np.isnan(y)):
+        return np.full(n, np.nan)
+    x = np.linspace(0, 1, len(y))
+    good = ~np.isnan(y)
+    return np.interp(np.linspace(0, 1, n), x[good], y[good])
+
+
+def norm_curves(tr, side, k0, k1, mass_kg, neutral=None):
+    """
+    Each joint signal over kinematic frames k0..k1 resampled to 0–100 %.
+    Moments / powers divided by body mass (Nm/kg, W/kg).
+    """
+    out = {}
+    m = mass_kg if mass_kg and mass_kg == mass_kg else 1.0
+    for key, (kind, joint, comp, sign) in CURVE_SPEC.items():
+        if kind in ("angle", "frontal"):
+            a = _angle(tr, side, joint, comp)
+        elif kind == "moment":
+            a = _moment(tr, side, joint, comp)
+        else:
+            a = _power(tr, side, joint)
+        seg = _seg(a, k0, k1)
+        if seg is None or len(seg) < 3:
+            out[key] = np.full(N_PTS, np.nan)
+            continue
+        seg = sign * np.asarray(seg, float)
+        if kind == "angle" and joint == "Ankle":
+            seg = seg - (neutral if neutral is not None else 90.0)
+        if kind == "frontal":
+            seg = seg - seg[0]
+        if kind in ("moment", "power"):
+            seg = seg / m
+        out[key] = _resample(seg)
+    return out
+
+
+def curve_stats(curves, key):
+    """Peak, min, ROM, time-of-peak (% of window) for one normalised curve."""
+    y = curves.get(key)
+    if y is None or np.all(np.isnan(y)):
+        return {}
+    return {"peak": float(np.nanmax(y)), "min": float(np.nanmin(y)),
+            "rom": float(np.nanmax(y) - np.nanmin(y)), "t_peak": float(np.nanargmax(y))}
+
+
 # ─── per-limb kinematics / kinetics in a kinematic window ─────────────────────
 
 def limb_mechanics(tr, side, k0, k1, neutral=None, prefix=""):
@@ -329,6 +401,13 @@ def analyse_drop(tr, surg, mass_n, neutral, rejump=True):
     d.update(limb_mechanics(tr, surg, k0, k1, neutral.get(surg), "s_"))
     d.update(limb_mechanics(tr, ns,   k0, k1, neutral.get(ns),   "n_"))
     _with_lsi(d, _MECH_LSI, d)
+    # time-normalised curves: DJ over the whole contact, DL over the first 500 ms
+    ck1 = k1 if rejump else min(k1, k0 + int(0.5 * tr.rate_k))
+    mkg = mass_n / G if mass_n == mass_n else None
+    d["curves_s"] = norm_curves(tr, surg, k0, ck1, mkg, neutral.get(surg))
+    d["curves_n"] = norm_curves(tr, ns, k0, ck1, mkg, neutral.get(ns))
+    if rejump and v2 is not None and e > s:
+        d["event_pct"] = 100.0 * (o["concentric_start_idx"] - s) / (e - s)
 
     # figure window
     f0 = max(0, s - int(0.05 * rate))
@@ -449,6 +528,11 @@ def analyse_cmj(tr, surg, mass_n, neutral):
             d[f"{tag}{j.lower()}_pos_share"] = (100 * d[f"{tag}{j.lower()}_pos_work"] / tot_pos
                                                 if tot_pos > 0 else np.nan)
     _with_lsi(d, _MECH_LSI, d)
+    mkg = ph["bw"] / G
+    d["curves_s"] = norm_curves(tr, surg, k0, k1, mkg, neutral.get(surg))
+    d["curves_n"] = norm_curves(tr, ns, k0, k1, mkg, neutral.get(ns))
+    if to > on:
+        d["event_pct"] = 100.0 * (bot - on) / (to - on)
 
     f0 = max(0, on - int(0.3 * rate))
     f1 = min(n, ph["land"] + int(0.3 * rate))
@@ -511,6 +595,10 @@ def analyse_slv(tr, side, mass_n, neutral):
     for j in JOINTS:
         d[f"{j.lower()}_pos_share"] = 100 * d[f"{j.lower()}_pos_work"] / tot_pos if tot_pos > 0 else np.nan
 
+    d["curves"] = norm_curves(tr, side, k0, k1, ph["bw"] / G, neutral.get(side))
+    if to > on:
+        d["event_pct"] = 100.0 * (bot - on) / (to - on)
+
     f0 = max(0, on - int(0.3 * rate))
     f1 = min(len(fz), ph["land"] + int(0.3 * rate))
     kf0, kf1 = _k(f0, tr), _k(f1, tr)
@@ -533,7 +621,8 @@ def aggregate(results, key_metric=None):
     results = [r for r in results if r is not None]
     if not results:
         return None
-    keys = sorted({k for d, _ in results for k in d if k not in ("trial", "qc")})
+    keys = sorted({k for d, _ in results for k in d
+                   if k not in ("trial", "qc") and not isinstance(d[k], dict)})
     mean, sd = {}, {}
     for k in keys:
         vals = np.array([d.get(k, np.nan) for d, _ in results], dtype=float)
@@ -554,4 +643,13 @@ def aggregate(results, key_metric=None):
     names = [d["trial"] for d, _ in results]
     qc = sorted({f"{d['trial']}: {f}" for d, _ in results for f in (d.get("qc") or [])})
     mean["_qc"] = qc
+    # curves: mean ± SD across trials, per curve key
+    for ck in sorted({k for d, _ in results for k in d if isinstance(d.get(k), dict)}):
+        stack = {}
+        for d, _ in results:
+            for key, arr in (d.get(ck) or {}).items():
+                stack.setdefault(key, []).append(arr)
+        mean[ck] = {key: np.nanmean(np.vstack(v), axis=0) for key, v in stack.items()}
+        mean[ck + "_sd"] = {key: (np.nanstd(np.vstack(v), axis=0) if len(v) > 1 else np.zeros(N_PTS))
+                            for key, v in stack.items()}
     return mean, sd, rep, len(results), names
