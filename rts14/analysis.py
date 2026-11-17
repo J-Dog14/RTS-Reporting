@@ -550,7 +550,7 @@ def analyse_cmj(tr, surg, mass_n, neutral):
     return d, sig
 
 
-def analyse_slv(tr, side, mass_n, neutral):
+def analyse_slv(tr, side, mass_n, neutral, stab_window=None):
     """One single-leg vertical trial (plate FP3), metrics for that limb only."""
     fz = tr.fz("FP3")
     if fz is None:
@@ -599,6 +599,8 @@ def analyse_slv(tr, side, mass_n, neutral):
     if to > on:
         d["event_pct"] = 100.0 * (bot - on) / (to - on)
 
+    d.update(landing_stability(tr, "FP3", side, ph.get("land"), to, ph.get("bw") or mass_n,
+                               neutral.get(side), window_s=stab_window))
     f0 = max(0, on - int(0.3 * rate))
     f1 = min(len(fz), ph["land"] + int(0.3 * rate))
     kf0, kf1 = _k(f0, tr), _k(f1, tr)
@@ -608,6 +610,142 @@ def analyse_slv(tr, side, mass_n, neutral):
     sig["cop_y"] = None if cop is None else cop[f0:min(f1, to), 1]
     sig["fz_cop"] = fz[f0:min(f1, to)]
     return d, sig
+
+
+# ─── single-leg landing stability (ankle-stability report) ───────────────────
+#
+# The single-leg vertical lands back on the same plate (FP3), so every SLV
+# trial doubles as a single-leg jump-landing test — the standard dynamic
+# stability task for chronic ankle instability.
+#
+# Window: whatever is recorded after landing (up to 3 s), ending early if the
+# athlete steps off the plate. pipeline.py runs a first pass to find the
+# shortest usable window across ALL single-leg trials (both legs) and then
+# analyses every trial over that same window, so sides stay comparable.
+#
+#   DPSI  Dynamic Postural Stability Index (Wikstrom 2005): RMS of ML shear,
+#         AP shear and (BW − Fz), ÷ BW, over the window.
+#   TTS   time to stabilisation: last moment the 100 ms moving mean of the
+#         force leaves its band (vertical: BW ± 5 % BW; ML / AP: the settled
+#         value over the last 25 % of the window ± 2.5 % BW). If the force is
+#         still outside the band at the end, TTS = the window length (flagged).
+#   Ankle frontal excursion: largest change in ankle frontal angle (Y) from
+#         touchdown over the first 200 ms — direction-free.
+
+STAB_MAX_S = 3.0      # longest window used
+STAB_MIN_S = 0.3      # below this nothing is reported
+
+
+def _settle_time(y, ref, band, rate, smooth_s=0.1):
+    """(seconds until the moving mean stays within ref ± band, censored?)."""
+    w = max(1, int(smooth_s * rate))
+    if len(y) <= w:
+        return np.nan, False
+    mm = np.convolve(y, np.ones(w) / w, mode="valid")
+    out = np.where(np.abs(mm - ref) > band)[0]
+    if not len(out):
+        return 0.0, False
+    censored = out[-1] >= len(mm) - 1
+    return float((out[-1] + w) / rate), bool(censored)
+
+
+def landing_window(tr, plate, land, takeoff, bw):
+    """Usable seconds after landing: to the end of the trial or until the foot unloads."""
+    F = tr.force.get(plate)
+    if F is None or land is None or not bw or bw != bw:
+        return np.nan
+    rate = tr.rate_f
+    fz = np.nan_to_num(np.asarray(F, float)[:, 2])
+    if takeoff is not None and land - takeoff > int(0.05 * rate):
+        fz = fz - np.median(fz[int(takeoff) + int(0.01 * rate):int(land) - int(0.01 * rate)])
+    post = lowpass(fz[int(land):], rate, 20.0) if len(fz) - land > 30 else fz[int(land):]
+    # stepped off = below 20 % BW for 50 ms (a deep dip while absorbing the landing is not a step-off)
+    i0 = int(0.1 * rate)
+    low = (post[i0:] < 0.2 * bw).astype(int)
+    k = max(1, int(0.05 * rate))
+    run = np.convolve(low, np.ones(k, dtype=int), mode="valid") if len(low) >= k else np.array([])
+    off = np.where(run >= k)[0]
+    n = (i0 + off[0]) if len(off) else len(post)
+    return min(n / rate, STAB_MAX_S)
+
+
+def landing_stability(tr, plate, side, land, takeoff, bw, neutral=None, window_s=None):
+    F = tr.force.get(plate)
+    if F is None or land is None or bw is None or not bw == bw or bw <= 0:
+        return {}
+    rate = tr.rate_f
+    avail = landing_window(tr, plate, land, takeoff, bw)
+    win_s = avail if window_s is None or window_s != window_s else min(window_s, avail)
+    out = {"land_window_s": avail}
+    if not win_s == win_s or win_s < STAB_MIN_S:
+        return out
+    F = np.nan_to_num(np.asarray(F, float))
+    land = int(land)
+    if takeoff is not None and land - int(takeoff) > int(0.05 * rate):       # zero each axis in flight
+        F = F - np.median(F[int(takeoff) + int(0.01 * rate):land - int(0.01 * rate)], axis=0)
+    w = int(win_s * rate)
+    seg = np.column_stack([lowpass(F[land:land + w + int(0.1 * rate), i], rate, 20.0)[:w] for i in range(3)])
+    fx, fy, fz = seg[:, 0], seg[:, 1], seg[:, 2]
+    out["land_used_s"] = w / rate
+    i15 = int(0.15 * rate)
+    ip = int(np.argmax(fz[:i15]))
+    out["land_peak_bw"] = float(fz[ip] / bw)
+    out["land_t_peak_ms"] = 1000.0 * ip / rate
+    out["land_load_rate_bw"] = float(fz[ip] / bw / (ip / rate)) if ip > 0 else np.nan
+
+    a, b, c = fx, fy, bw - fz
+    out["land_mlsi"] = float(np.sqrt(np.mean(a ** 2)) / bw)
+    out["land_apsi"] = float(np.sqrt(np.mean(b ** 2)) / bw)
+    out["land_vsi"] = float(np.sqrt(np.mean(c ** 2)) / bw)
+    out["land_dpsi"] = float(np.sqrt(np.mean(a ** 2 + b ** 2 + c ** 2)) / bw)
+    cop = tr.cop.get(plate)
+    if cop is not None and len(cop) >= land + w:
+        loaded = fz > 0.5 * bw
+        ml = np.asarray(cop[land:land + w, 0], float)
+        ml = ml[loaded & ~np.isnan(ml)]
+        if len(ml) > 0.5 * w:
+            out["land_cop_ml_mm"] = float(np.ptp(ml))
+
+    tail = slice(int(0.75 * w), w)
+    cens = 0
+    for key, y, ref, band in (("v", fz, bw, 0.05 * bw),
+                              ("ml", fx, float(np.mean(fx[tail])), 0.025 * bw),
+                              ("ap", fy, float(np.mean(fy[tail])), 0.025 * bw)):
+        t, cz = _settle_time(y, ref, band, rate)
+        out[f"land_tts_{key}"] = t
+        cens += int(cz)
+    out["land_tts_censored"] = float(cens)
+
+    # kinematics around touchdown
+    k0 = _k(land, tr)
+    k200 = k0 + int(min(0.2, win_s) * tr.rate_k)
+    for key, joint in (("ankle_fr", "Ankle"), ("knee_fr", "Knee"), ("hip_fr", "Hip")):
+        aa = _seg(_angle(tr, side, joint, "Y"), k0, k200)
+        if aa is not None and len(aa) > 3 and np.any(~np.isnan(aa)):
+            out[f"land_{key}_exc"] = float(np.nanmax(np.abs(aa - aa[0])))
+    aa = _seg(_angle(tr, side, "Ankle", "X"), k0, k200)
+    if aa is not None and len(aa) > 3:
+        aa = aa - (neutral if neutral is not None else 90.0)
+        out["land_ankle_df_td"] = float(aa[0])
+        out["land_ankle_df_peak"] = float(np.nanmax(aa))
+
+    # normalised landing curves (kinematics: first 500 ms or the window; forces: the window)
+    kw = k0 + int(min(0.5, win_s) * tr.rate_k)
+    lc = {}
+    for key, joint, comp in (("ankle_fr", "Ankle", "Y"), ("knee_fr", "Knee", "Y"),
+                             ("hip_fr", "Hip", "Y"), ("ankle_ang", "Ankle", "X")):
+        aa = _seg(_angle(tr, side, joint, comp), k0, kw)
+        if aa is None or len(aa) < 0.9 * (kw - k0):
+            lc[key] = np.full(N_PTS, np.nan)
+            continue
+        aa = np.asarray(aa, float)
+        aa = aa - (aa[0] if comp == "Y" else (neutral if neutral is not None else 90.0))
+        lc[key] = _resample(aa)
+    lc["fz_bw"] = _resample(fz / bw)
+    lc["fml_bw"] = _resample(100.0 * (fx - np.mean(fx[tail])) / bw)
+    lc["fap_bw"] = _resample(100.0 * (fy - np.mean(fy[tail])) / bw)
+    out["land_curves"] = lc
+    return out
 
 
 # ─── aggregation ─────────────────────────────────────────────────────────────

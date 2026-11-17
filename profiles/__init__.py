@@ -8,9 +8,10 @@ it to build_report(). See profiles/base.py for how to add a new one.
 from profiles.base import ReportProfile, ManualTest
 from profiles.acl import PROFILE as ACL
 from profiles.achilles import PROFILE as ACHILLES
+from profiles.ankle_stability import PROFILE as ANKLE_STABILITY
 
 # Order here = order of buttons in the picker
-PROFILES = [ACL, ACHILLES]
+PROFILES = [ACL, ACHILLES, ANKLE_STABILITY]
 PROFILES_BY_KEY = {p.key: p for p in PROFILES}
 DEFAULT_PROFILE = "acl"
 

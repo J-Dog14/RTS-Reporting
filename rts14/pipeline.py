@@ -214,9 +214,26 @@ def build_results(folder: str, surg_side: str, body_n: float = None):
             }
 
     # ── Single-leg vertical ──────────────────────────────────────────────────
+    # Pass 1 finds how much post-landing data every single-leg trial has; pass 2
+    # analyses all trials (both legs) over the shortest one so sides compare fairly.
+    first = {side: [A.analyse_slv(t, side, bw, neutral) for t in S.by_test(f"slv_{side}")]
+             for side in ("L", "R")}
+    wins = [r[0].get("land_window_s") for side in first for r in first[side] if r is not None]
+    wins = [w for w in wins if w is not None and w == w and w >= A.STAB_MIN_S]
+    stab_win = min(wins) if wins else None
+    for side in ("L", "R"):
+        for t, r in zip(S.by_test(f"slv_{side}"), first[side]):
+            w = None if r is None else r[0].get("land_window_s")
+            print(f"  SL landing      : {t.name:<8} "
+                  + ("jump not detected" if r is None else
+                     "landing not detected" if w is None else f"{w:.2f} s usable after landing")
+                  + ("  (too short, < 0.3 s)" if w is not None and w == w and w < A.STAB_MIN_S else ""))
+    print(f"  SL landing      : window used for all trials = "
+          + (f"{stab_win:.2f} s" if stab_win else "none"))
     per = {}
     for side in ("L", "R"):
-        per[side] = A.aggregate([A.analyse_slv(t, side, bw, neutral) for t in S.by_test(f"slv_{side}")],
+        per[side] = A.aggregate([A.analyse_slv(t, side, bw, neutral, stab_window=stab_win)
+                                 for t in S.by_test(f"slv_{side}")] if stab_win else first[side],
                                 key_metric="jump_height_in")
     if per["L"] and per["R"]:
         ms, sds, reps, ns_n, names_s = per[surg]
@@ -259,6 +276,30 @@ def build_results(folder: str, surg_side: str, body_n: float = None):
         sig["qc"] = (ms.get("_qc") or []) + (mn.get("_qc") or [])
         sig["joint_work"] = {"kind": "pos", **{tag: {j: _g(merged, f"{tag}_{j}_pos_work") for j in ("hip", "knee", "ankle")} for tag in ("s", "n")}}
         sig["curves"] = {"s": ms.get("curves"), "s_sd": ms.get("curves_sd"), "n": mn.get("curves"), "n_sd": mn.get("curves_sd"), "event_pct": ms.get("event_pct"), "x_label": "% of movement (onset → take-off)", "event_label": "bottom (surgical)"}
+        # single-leg landing stability (each SLV trial lands back on FP3)
+        def _inv(a, b):          # lower-is-better metrics: 100 = symmetric, < 100 = surgical worse
+            return lsi(b, a)
+        stab_rows = [
+            ("Landing peak vGRF (×BW)", _g(ms, "land_peak_bw"), _g(mn, "land_peak_bw"),
+             lsi(ms.get("land_peak_bw"), mn.get("land_peak_bw")), None, None),
+            (f"Landing DPSI, {stab_win or 0:.1f} s (lower = steadier)", _g(ms, "land_dpsi"), _g(mn, "land_dpsi"),
+             _inv(ms.get("land_dpsi"), mn.get("land_dpsi")), None, None),
+            ("Landing ML stability index", _g(ms, "land_mlsi"), _g(mn, "land_mlsi"),
+             _inv(ms.get("land_mlsi"), mn.get("land_mlsi")), None, None),
+            ("Landing time to stabilise, ML (s)", _g(ms, "land_tts_ml"), _g(mn, "land_tts_ml"),
+             _inv(ms.get("land_tts_ml"), mn.get("land_tts_ml")), None, None),
+            ("Landing ankle frontal excursion, 200 ms (°)", _g(ms, "land_ankle_fr_exc"),
+             _g(mn, "land_ankle_fr_exc"), None, None, None),
+        ]
+        sig["extra_rows"] += [r for r in stab_rows if r[1] == r[1] or r[2] == r[2]]
+        keys = sorted({k for k in list(ms) + list(mn) if k.startswith("land_") and not k.startswith("land_curves")})
+        sig["stability"] = {
+            "s": {k: ms.get(k) for k in keys}, "n": {k: mn.get(k) for k in keys},
+            "s_sd": {k: sds.get(k) for k in keys}, "n_sd": {k: sdn.get(k) for k in keys},
+            "curves_s": ms.get("land_curves"), "curves_s_sd": ms.get("land_curves_sd"),
+            "curves_n": mn.get("land_curves"), "curves_n_sd": mn.get("land_curves_sd"),
+            "n_trials": (ns_n, nn_n), "window_s": stab_win,
+        }
         signals["single_leg_jump"] = sig
 
     # ── Balance ──────────────────────────────────────────────────────────────

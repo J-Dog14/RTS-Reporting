@@ -66,6 +66,10 @@ class ReportProfile:
     extra_pages:     List[str] = field(default_factory=list)   # e.g. ["calf_ankle"]
     domain_map:      Optional[Callable[[str, str], Optional[str]]] = None  # (LSI label, default domain) → radar domain
     chart_exclude:   List[str] = field(default_factory=list)   # substrings hidden from the summary LSI chart
+    # (test_results, all_signals) -> [(label, surg, ns, lsi, domain, rtr_key), ...]
+    # Extra metrics registered in the LSI chart / radar / flags / score for this
+    # profile only (e.g. landing-stability metrics for the ankle-stability report).
+    extra_reg:       Optional[Callable] = None
 
     # Text ------------------------------------------------------------------
     # text[test_key][field] -> str.  test_key in:

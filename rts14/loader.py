@@ -104,9 +104,14 @@ def _read_export(path: Path) -> Dict[str, Dict[str, Dict[str, np.ndarray]]]:
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         hdr = [fh.readline().rstrip("\r\n").split("\t") for _ in range(5)]
     paths, sigs, _types, _folders, comps = hdr
-    body = pd.read_csv(path, sep="\t", header=None, skiprows=5,
-                       engine="c", na_values=["", "NaN", "nan"],
-                       dtype=float, on_bad_lines="skip")
+    try:
+        body = pd.read_csv(path, sep="\t", header=None, skiprows=5,
+                           engine="c", na_values=["", "NaN", "nan"],
+                           dtype=float, on_bad_lines="skip")
+    except pd.errors.EmptyDataError:
+        print(f"[v14] WARNING: {path.name} has no data rows - skipped "
+              f"(re-export it from Visual3D if it should have data)")
+        return {}
     arr = body.to_numpy(dtype=float)
 
     out: Dict[str, dict] = {}

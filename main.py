@@ -1602,7 +1602,7 @@ def run(session_folder: str,
     report_word = f"RTS {profile.file_tag} Report" if profile.file_tag else "RTS Report"
     output_path = str(out_folder / f"{report_word}_{safe_name}_{date_str_short}.pdf")
     print(f"[main] Generating PDF → {output_path}")
-    build_report(
+    output_path = build_report(
         output_path=output_path,
         patient_data=patient_data,
         test_results=test_results,

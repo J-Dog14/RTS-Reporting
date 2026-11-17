@@ -932,6 +932,20 @@ def build_report(output_path: str, patient_data: dict,
     _ankle = {"seen": False}   # did ANY ankle angle / moment signal arrive?
 
     s   = _styles()
+    # If the PDF is open in a viewer (locked on Windows), save a numbered copy
+    import os as _os
+    _base, _ext = _os.path.splitext(output_path)
+    _n = 1
+    while True:
+        try:
+            with open(output_path, "ab"):
+                pass
+            break
+        except PermissionError:
+            _n += 1
+            output_path = f"{_base} ({_n}){_ext}"
+    if _n > 1:
+        print(f"[report] Original PDF is open/locked - saving as {output_path}")
     doc = SimpleDocTemplate(
         output_path, pagesize=PAGE,
         leftMargin=MARGIN, rightMargin=MARGIN,
@@ -2112,6 +2126,12 @@ def build_report(output_path: str, patient_data: dict,
         if mt.get("lsi") is not None and 75 <= mt["lsi"] < 90:
             clinical_notes.append(f"{mt_def.label}: LSI {mt['lsi']:.1f}% — below 90% target")
 
+    if P.extra_reg is not None:
+        try:
+            for _lab, _sv, _nv, _lv, _dom, _rk in P.extra_reg(test_results, all_signals) or []:
+                _reg(_lab, _sv, _nv, _lv, _dom, _rk)
+        except Exception as _e:          # never let a profile hook kill the report
+            print(f"[report] profile extra metrics skipped: {_e}")
     if P.ankle_focus and not _ankle["seen"] and P.t("summary", "ankle_missing"):
         summary_notes.append(P.t("summary", "ankle_missing"))
     # (profile "focus" blurb no longer printed on page 1 — the About boxes and
@@ -2165,6 +2185,13 @@ def build_report(output_path: str, patient_data: dict,
              "_fig_pair": _fig_pair, "W_FULL": W_FULL, "W_HALF": W_HALF},
             rate_kin)          # test sections follow (each starts with its own CondPageBreak)
 
+    if "ankle_stability" in (P.extra_pages or []):
+        from rts14 import stability_page
+        extra_pages = stability_page.build(
+            test_results, all_signals, patient_data, P, s,
+            {"_sec": _sec, "_interp_box": _interp_box, "_fig_img": _fig_img,
+             "_fig_pair": _fig_pair, "W_FULL": W_FULL, "W_HALF": W_HALF},
+            rate_kin)
     full_story = summary_story + [PageBreak()] + extra_pages + ordered
     doc.build(full_story)
     return output_path
